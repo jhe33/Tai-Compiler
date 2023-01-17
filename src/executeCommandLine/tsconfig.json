@@ -1,6 +1,7 @@
 {
     "extends": "../tsconfig-base",
     "compilerOptions": {
+        "sourceMap": true,
         "outFile": "../../built/local/executeCommandLine.js"
     },
 

@@ -25716,6 +25716,42 @@ namespace ts {
                 (isConstVariable(localOrExportSymbol) && type !== autoArrayType || isParameter && !isSymbolAssigned(localOrExportSymbol))) {
                 flowContainer = getControlFlowContainer(flowContainer);
             }
+
+            // qjs emitter
+            if (isOuterVariable) {
+                const curContainer = getControlFlowContainer(flowContainer);
+                if (declarationContainer === curContainer) {
+                    const cv: ClosureVar = {
+                        name: getTextOfNode(node),
+                        isLocal: true,
+                        isArg: false,
+                        isLexcial: true,
+                        index: symbol.stackIndex!,
+                        symbol,
+                    };
+
+                    if (flowContainer.kind === SyntaxKind.FunctionDeclaration) {
+                        let hasCaptured = false;
+                        const func = flowContainer as FunctionDeclaration;
+                        if (!func.closureVars) {
+                            func.closureVars = [];
+                        }
+
+                        for (const cvar of func.closureVars) {
+                            if (cvar.index === cv.index &&
+                                cvar.isLocal === cv.isLocal &&
+                                cvar.isArg === cv.isArg) {
+                                    hasCaptured = true;
+                                    break;
+                                }
+                        }
+
+                        if (!hasCaptured) {
+                            func.closureVars.push(cv);
+                        }
+                    }
+                }
+            }
             // We only look for uninitialized variables in strict null checking mode, and only when we can analyze
             // the entire control flow graph from the variable's declaration (i.e. when the flow container and
             // declaration container are the same).
@@ -42774,6 +42810,10 @@ namespace ts {
             return nodeBuilder.typeToTypeNode(type, enclosingDeclaration, flags | NodeBuilderFlags.MultilineObjectLiterals, tracker);
         }
 
+        function getTypeChecker(): TypeChecker {
+            return checker;
+        }
+
         function hasGlobalName(name: string): boolean {
             return globals.has(escapeLeadingUnderscores(name));
         }
@@ -42880,6 +42920,7 @@ namespace ts {
             }
 
             return {
+                getTypeChecker,
                 getReferencedExportContainer,
                 getReferencedImportDeclaration,
                 getReferencedDeclarationWithCollidingName,

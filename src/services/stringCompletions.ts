@@ -107,6 +107,7 @@ namespace ts.Completions.StringCompletions {
         switch (extension) {
             case Extension.Dts: return ScriptElementKindModifier.dtsModifier;
             case Extension.Js: return ScriptElementKindModifier.jsModifier;
+            case Extension.Qjs: return ScriptElementKindModifier.jsModifier;
             case Extension.Json: return ScriptElementKindModifier.jsonModifier;
             case Extension.Jsx: return ScriptElementKindModifier.jsxModifier;
             case Extension.Ts: return ScriptElementKindModifier.tsModifier;
