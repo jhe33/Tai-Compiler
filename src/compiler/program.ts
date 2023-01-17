@@ -2014,6 +2014,8 @@ namespace ts {
 
             performance.mark("beforeEmit");
 
+            options.emitQJSCode = false;
+
             const emitResult = emitFiles(
                 emitResolver,
                 getEmitHost(writeFileCallback),
@@ -2023,6 +2025,21 @@ namespace ts {
                 /*onlyBuildInfo*/ false,
                 forceDtsEmit
             );
+
+            if (!emitResult.emitSkipped) {
+                options.emitQJSCode = true;
+                const emitNativeResult: EmitResult = emitNativeFiles(
+                    emitResolver,
+                    getEmitHost(writeFileCallback),
+                    sourceFile,
+                    getTransformers(options, customTransformers, emitOnlyDtsFiles),
+                );
+
+                emitResult.emitSkipped = emitNativeResult.emitSkipped;
+                if (!!emitResult.emittedFiles && !!emitNativeResult.emittedFiles) {
+                    emitResult.emittedFiles.concat(emitNativeResult.emittedFiles);
+                }
+            }
 
             performance.mark("afterEmit");
             performance.measure("Emit", "beforeEmit", "afterEmit");

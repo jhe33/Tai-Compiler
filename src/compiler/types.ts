@@ -1487,10 +1487,21 @@ namespace ts {
     /** @deprecated Use SignatureDeclaration */
     export type FunctionLike = SignatureDeclaration;
 
+    export interface ClosureVar {
+        isLocal: boolean;
+        isArg: boolean;
+        isLexcial: boolean;
+        name: string;
+        index: number;
+        symbol: Symbol;
+    }
+
     export interface FunctionDeclaration extends FunctionLikeDeclarationBase, DeclarationStatement {
         readonly kind: SyntaxKind.FunctionDeclaration;
         readonly name?: Identifier;
         readonly body?: FunctionBody;
+        localsCount: number;
+        closureVars: ClosureVar[];
     }
 
     export interface MethodSignature extends SignatureDeclarationBase, TypeElement {
@@ -4416,12 +4427,12 @@ namespace ts {
          */
         /* @internal */ getAccessibleSymbolChain(symbol: Symbol, enclosingDeclaration: Node | undefined, meaning: SymbolFlags, useOnlyExternalAliasing: boolean): Symbol[] | undefined;
         getTypePredicateOfSignature(signature: Signature): TypePredicate | undefined;
-        /* @internal */ resolveExternalModuleName(moduleSpecifier: Expression): Symbol | undefined;
+        resolveExternalModuleName(moduleSpecifier: Expression): Symbol | undefined;
         /**
          * An external module with an 'export =' declaration resolves to the target of the 'export =' declaration,
          * and an external module with no 'export =' declaration resolves to the module itself.
          */
-        /* @internal */ resolveExternalModuleSymbol(symbol: Symbol): Symbol;
+        resolveExternalModuleSymbol(symbol: Symbol): Symbol;
         /** @param node A location where we might consider accessing `this`. Not necessarily a ThisExpression. */
         /* @internal */ tryGetThisTypeAt(node: Node, includeGlobalThis?: boolean): Type | undefined;
         /* @internal */ getTypeArgumentConstraint(node: TypeNode): Type | undefined;
@@ -4782,6 +4793,7 @@ namespace ts {
 
     /* @internal */
     export interface EmitResolver {
+        getTypeChecker(): TypeChecker;
         hasGlobalName(name: string): boolean;
         getReferencedExportContainer(node: Identifier, prefixLocals?: boolean): SourceFile | ModuleDeclaration | EnumDeclaration | undefined;
         getReferencedImportDeclaration(node: Identifier): Declaration | undefined;
@@ -4928,6 +4940,7 @@ namespace ts {
         members?: SymbolTable;                  // Class, interface or object literal instance members
         exports?: SymbolTable;                  // Module exports
         globalExports?: SymbolTable;            // Conditional global UMD exports
+        stackIndex?: number;
         /* @internal */ id?: SymbolId;          // Unique id (used to look up SymbolLinks)
         /* @internal */ mergeId?: number;       // Merge id (used to look up merged symbol)
         /* @internal */ parent?: Symbol;        // Parent symbol
@@ -6124,6 +6137,8 @@ namespace ts {
         declaration?: boolean;
         declarationMap?: boolean;
         emitDeclarationOnly?: boolean;
+        emitQJSCode?: boolean;
+        emitQJSIR?: boolean;
         declarationDir?: string;
         /* @internal */ diagnostics?: boolean;
         /* @internal */ extendedDiagnostics?: boolean;
@@ -6700,6 +6715,7 @@ namespace ts {
         Cjs = ".cjs",
         Cts = ".cts",
         Dcts = ".d.cts",
+        Qjs = ".c",
     }
 
     export interface ResolvedModuleWithFailedLookupLocations {
@@ -8126,8 +8142,8 @@ namespace ts {
         printBundle(bundle: Bundle): string;
         /*@internal*/ writeNode(hint: EmitHint, node: Node, sourceFile: SourceFile | undefined, writer: EmitTextWriter): void;
         /*@internal*/ writeList<T extends Node>(format: ListFormat, list: NodeArray<T> | undefined, sourceFile: SourceFile | undefined, writer: EmitTextWriter): void;
-        /*@internal*/ writeFile(sourceFile: SourceFile, writer: EmitTextWriter, sourceMapGenerator: SourceMapGenerator | undefined): void;
-        /*@internal*/ writeBundle(bundle: Bundle, writer: EmitTextWriter, sourceMapGenerator: SourceMapGenerator | undefined): void;
+        /*@internal*/ writeFile(sourceFile: SourceFile, writer: EmitTextWriter, writer2: EmitTextWriter | undefined, sourceMapGenerator: SourceMapGenerator | undefined): void;
+        /*@internal*/ writeBundle(bundle: Bundle, writer: EmitTextWriter, writer2: EmitTextWriter | undefined, sourceMapGenerator: SourceMapGenerator | undefined): void;
         /*@internal*/ bundleFileInfo?: BundleFileInfo;
     }
 
@@ -8246,6 +8262,7 @@ namespace ts {
     }
 
     export interface PrintHandlers {
+        getTypeChecker?(): TypeChecker;
         /**
          * A hook used by the Printer when generating unique names to avoid collisions with
          * globally defined names that exist outside of the current source file.
@@ -8310,6 +8327,8 @@ namespace ts {
         newLine?: NewLineKind;
         omitTrailingSemicolon?: boolean;
         noEmitHelpers?: boolean;
+        emitQJSCode?: CompilerOptions["emitQJSCode"];
+        emitQJSIR?: CompilerOptions["emitQJSIR"];
         /*@internal*/ module?: CompilerOptions["module"];
         /*@internal*/ target?: CompilerOptions["target"];
         /*@internal*/ sourceMap?: boolean;
@@ -8416,6 +8435,8 @@ namespace ts {
         hasTrailingWhitespace(): boolean;
         getTextPosWithWriteLine?(): number;
         nonEscapingWrite?(text: string): void;
+        push?(): void;
+        pop?(): void;
     }
 
     export interface GetEffectiveTypeRootsHost {

@@ -1,6 +1,7 @@
 {
     "extends": "../tsconfig-base",
     "compilerOptions": {
+        "sourceMap": true,
         "outFile": "../../built/local/compiler.js",
         "types": ["node"]
     },
@@ -68,6 +69,7 @@
         "transformers/declarations.ts",
         "transformer.ts",
         "emitter.ts",
+        "native_emitter.ts",
         "watchUtilities.ts",
         "program.ts",
         "builderStatePublic.ts",

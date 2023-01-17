@@ -75,7 +75,7 @@ namespace ts {
             trackSymbol: () => false,
             reportInaccessibleThisError: noop,
             reportInaccessibleUniqueSymbolError: noop,
-            reportPrivateInBaseOfClassExpression: noop,
+            reportPrivateInBaseOfClassExpression: noop
         };
     }
 
@@ -4105,6 +4105,8 @@ namespace ts {
 
     export function createTextWriter(newLine: string): EmitTextWriter {
         let output: string;
+        interface Frame {text: string, ind: number, trailling: boolean};
+        let stack: Frame[];
         let indent: number;
         let lineStart: boolean;
         let lineCount: number;
@@ -4134,6 +4136,32 @@ namespace ts {
             }
         }
 
+        function push() {
+            if (output === "") {
+                return;
+            }
+
+            stack.push({text: output, ind: indent, trailling: hasTrailingComment});
+            output = "";
+            indent = 0;
+            lineStart = true;
+            lineCount = 0;
+            linePos = 0;
+            hasTrailingComment = false;
+        }
+
+        function pop() {
+            if (stack.length === 0) {
+                return;
+            }
+
+            const frame = stack.pop()!;
+            output = output + frame.text;
+            indent = frame.ind;
+            hasTrailingComment = frame.trailling;
+            updateLineCountAndPosFor(frame.text);
+        }
+
         function write(s: string) {
             if (s) hasTrailingComment = false;
             writeText(s);
@@ -4151,6 +4179,7 @@ namespace ts {
             lineCount = 0;
             linePos = 0;
             hasTrailingComment = false;
+            stack = [];
         }
 
         function rawWrite(s: string) {
@@ -4213,7 +4242,9 @@ namespace ts {
             writeSymbol: (s, _) => write(s),
             writeTrailingSemicolon: write,
             writeComment,
-            getTextPosWithWriteLine
+            getTextPosWithWriteLine,
+            push,
+            pop,
         };
     }
 
@@ -4381,6 +4412,7 @@ namespace ts {
 
     export interface EmitFileNames {
         jsFilePath?: string | undefined;
+        qjsFilePath?: string | undefined;
         sourceMapFilePath?: string | undefined;
         declarationFilePath?: string | undefined;
         declarationMapPath?: string | undefined;

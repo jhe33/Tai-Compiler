@@ -90,6 +90,10 @@ namespace ts {
         }
         else {
             const ownOutputFilePath = getOwnEmitOutputFilePath(sourceFile.fileName, host, getOutputExtension(sourceFile.fileName, options));
+            let qjsFilePath: string | undefined;
+            if (!!options.emitQJSCode) {
+                qjsFilePath = getOwnEmitOutputFilePath(sourceFile.fileName, host, Extension.Qjs);
+            }
             const isJsonFile = isJsonSourceFile(sourceFile);
             // If json file emits to the same location skip writing it, if emitDeclarationOnly skip writing it
             const isJsonEmittedToSameLocation = isJsonFile &&
@@ -98,7 +102,7 @@ namespace ts {
             const sourceMapFilePath = !jsFilePath || isJsonSourceFile(sourceFile) ? undefined : getSourceMapFilePath(jsFilePath, options);
             const declarationFilePath = (forceDtsPaths || (getEmitDeclarations(options) && !isJsonFile)) ? getDeclarationEmitOutputFilePath(sourceFile.fileName, host) : undefined;
             const declarationMapPath = declarationFilePath && getAreDeclarationMapsEnabled(options) ? declarationFilePath + ".map" : undefined;
-            return { jsFilePath, sourceMapFilePath, declarationFilePath, declarationMapPath, buildInfoPath: undefined };
+            return { jsFilePath, qjsFilePath, sourceMapFilePath, declarationFilePath, declarationMapPath, buildInfoPath: undefined };
         }
     }
 
@@ -285,6 +289,7 @@ namespace ts {
         const emitterDiagnostics = createDiagnosticCollection();
         const newLine = getNewLineCharacter(compilerOptions, () => host.getNewLine());
         const writer = createTextWriter(newLine);
+        const qjsWriter = !!compilerOptions.emitQJSCode ? createTextWriter(newLine) : undefined;
         const { enter, exit } = performance.createTimer("printTime", "beforePrint", "afterPrint");
         let bundleBuildInfo: BundleBuildInfo | undefined;
         let emitSkipped = false;
@@ -311,7 +316,7 @@ namespace ts {
             exportedModulesFromDeclarationEmit
         };
 
-        function emitSourceFileOrBundle({ jsFilePath, sourceMapFilePath, declarationFilePath, declarationMapPath, buildInfoPath }: EmitFileNames, sourceFileOrBundle: SourceFile | Bundle | undefined) {
+        function emitSourceFileOrBundle({ jsFilePath, qjsFilePath, sourceMapFilePath, declarationFilePath, declarationMapPath, buildInfoPath }: EmitFileNames, sourceFileOrBundle: SourceFile | Bundle | undefined) {
             let buildInfoDirectory: string | undefined;
             if (buildInfoPath && sourceFileOrBundle && isBundle(sourceFileOrBundle)) {
                 buildInfoDirectory = getDirectoryPath(getNormalizedAbsolutePath(buildInfoPath, host.getCurrentDirectory()));
@@ -321,7 +326,7 @@ namespace ts {
                 };
             }
             tracing?.push(tracing.Phase.Emit, "emitJsFileOrBundle", { jsFilePath });
-            emitJsFileOrBundle(sourceFileOrBundle, jsFilePath, sourceMapFilePath, relativeToBuildInfo);
+            emitJsFileOrBundle(sourceFileOrBundle, jsFilePath, qjsFilePath, sourceMapFilePath, relativeToBuildInfo);
             tracing?.pop();
 
             tracing?.push(tracing.Phase.Emit, "emitDeclarationFileOrBundle", { declarationFilePath });
@@ -372,6 +377,7 @@ namespace ts {
         function emitJsFileOrBundle(
             sourceFileOrBundle: SourceFile | Bundle | undefined,
             jsFilePath: string | undefined,
+            qjsFilePath: string | undefined,
             sourceMapFilePath: string | undefined,
             relativeToBuildInfo: (path: string) => string) {
             if (!sourceFileOrBundle || emitOnlyDtsFiles || !jsFilePath) {
@@ -390,6 +396,8 @@ namespace ts {
                 removeComments: compilerOptions.removeComments,
                 newLine: compilerOptions.newLine,
                 noEmitHelpers: compilerOptions.noEmitHelpers,
+                emitQJSCode: compilerOptions.emitQJSCode,
+                emitQJSIR: compilerOptions.emitQJSIR,
                 module: compilerOptions.module,
                 target: compilerOptions.target,
                 sourceMap: compilerOptions.sourceMap,
@@ -402,6 +410,7 @@ namespace ts {
 
             // Create a printer to print the nodes
             const printer = createPrinter(printerOptions, {
+                getTypeChecker: resolver.getTypeChecker,
                 // resolver hooks
                 hasGlobalName: resolver.hasGlobalName,
 
@@ -412,7 +421,10 @@ namespace ts {
             });
 
             Debug.assert(transform.transformed.length === 1, "Should only see one output from the transform");
-            printSourceFileOrBundle(jsFilePath, sourceMapFilePath, transform.transformed[0], printer, compilerOptions);
+            if (!compilerOptions.emitQJSCode || !qjsFilePath) {
+                qjsFilePath = "";
+            }
+            printSourceFileOrBundle(jsFilePath, qjsFilePath, sourceMapFilePath, transform.transformed[0], printer, compilerOptions);
 
             // Clean up emit nodes on parse tree
             transform.dispose();
@@ -475,6 +487,7 @@ namespace ts {
                 Debug.assert(declarationTransform.transformed.length === 1, "Should only see one output from the decl transform");
                 printSourceFileOrBundle(
                     declarationFilePath,
+                    "",
                     declarationMapPath,
                     declarationTransform.transformed[0],
                     declarationPrinter,
@@ -509,7 +522,7 @@ namespace ts {
             forEachChild(node, collectLinkedAliases);
         }
 
-        function printSourceFileOrBundle(jsFilePath: string, sourceMapFilePath: string | undefined, sourceFileOrBundle: SourceFile | Bundle, printer: Printer, mapOptions: SourceMapOptions) {
+        function printSourceFileOrBundle(jsFilePath: string, qjsFilePath: string | undefined, sourceMapFilePath: string | undefined, sourceFileOrBundle: SourceFile | Bundle, printer: Printer, mapOptions: SourceMapOptions) {
             const bundle = sourceFileOrBundle.kind === SyntaxKind.Bundle ? sourceFileOrBundle : undefined;
             const sourceFile = sourceFileOrBundle.kind === SyntaxKind.SourceFile ? sourceFileOrBundle : undefined;
             const sourceFiles = bundle ? bundle.sourceFiles : [sourceFile!];
@@ -525,10 +538,10 @@ namespace ts {
             }
 
             if (bundle) {
-                printer.writeBundle(bundle, writer, sourceMapGenerator);
+                printer.writeBundle(bundle, writer, qjsWriter, sourceMapGenerator);
             }
             else {
-                printer.writeFile(sourceFile!, writer, sourceMapGenerator);
+                printer.writeFile(sourceFile!, writer, qjsWriter, sourceMapGenerator);
             }
 
             if (sourceMapGenerator) {
@@ -563,7 +576,10 @@ namespace ts {
 
             // Write the output file
             writeFile(host, emitterDiagnostics, jsFilePath, writer.getText(), !!compilerOptions.emitBOM, sourceFiles);
-
+            if (!!compilerOptions.emitQJSCode) {
+                writeFile(host, emitterDiagnostics, qjsFilePath!, qjsWriter!.getText(), !!compilerOptions.emitBOM, sourceFiles);
+                qjsWriter!.clear();
+            }
             // Reset state
             writer.clear();
         }
@@ -654,6 +670,7 @@ namespace ts {
 
     /*@internal*/
     export const notImplementedResolver: EmitResolver = {
+        getTypeChecker: notImplemented,
         hasGlobalName: notImplemented,
         getReferencedExportContainer: notImplemented,
         getReferencedImportDeclaration: notImplemented,
@@ -851,6 +868,7 @@ namespace ts {
 
     export function createPrinter(printerOptions: PrinterOptions = {}, handlers: PrintHandlers = {}): Printer {
         const {
+            getTypeChecker,
             hasGlobalName,
             onEmitNode = noEmitNotification,
             isEmitNotificationEnabled,
@@ -880,6 +898,10 @@ namespace ts {
         let nextListElementPos: number | undefined; // See comment in `getLeadingLineTerminatorCount`.
 
         let writer: EmitTextWriter;
+        let qjsWriter: EmitTextWriter | undefined;
+        const checker: TypeChecker | undefined = (!!printerOptions.emitQJSCode || !!printerOptions.emitQJSIR) ?
+                            (!!getTypeChecker ? getTypeChecker() : undefined) : undefined;
+        //let checker: TypeChecker | undefined;
         let ownWriter: EmitTextWriter; // Reusable `EmitTextWriter` for basic printing.
         let write = writeBase;
         let isOwnFileEmit: boolean;
@@ -913,6 +935,337 @@ namespace ts {
             select: index => index === 0 ? parenthesizer.parenthesizeLeadingTypeArgument : undefined
         };
         const emitBinaryExpression = createEmitBinaryExpression();
+
+        // for qjs emitter
+        const enum QJSCType {
+            Void = 0,
+            JSAtom,
+            JSValue,
+            IntLiteral,
+            FloatLiteral,
+            StringLiteral,
+            Tag,
+            Int,
+            Double,
+            Number,
+            Bool,
+            ClosureVar,
+            JSModuleDef,
+        }
+
+         //type QJSTypeInfo = {type: string, prefix: string};
+         const qjsTypeInfo = [
+            {type: "void", prefix: ""},
+            {type: "JSAtom", prefix: "atom_"},
+            {type: "JSValue", prefix: "jv_"},
+            {type: "int", prefix: "n_"},
+            {type: "double", prefix: "f_"},
+            {type: "JSString", prefix: "str_"},
+            {type: "int", prefix: "tag_"},
+            {type: "int", prefix: "n_"},
+            {type: "double", prefix: "f_"},
+            {type: "double", prefix: "f_"},
+            {type: "BOOL", prefix: "b_"},
+            {type: "JSClosureVar", prefix: "cv_"},
+            {type: "JSModuleDef", prefix: "md_"},
+        ];
+
+        const enum QJSJSType {
+            Null = 0,
+            Undefined,
+            Uninitialized,
+            NumLiteral,
+            Bool,
+            Int32,
+            Float64,
+            RefType,
+            StringLiteral,
+            String,
+            Object,
+            Function,
+            Pointer,
+            Any,
+            Unknown,
+        }
+
+        const enum QJSValueStackState {
+            None = -1,
+            LValue = 0,
+            RValue = 1,
+        }
+
+        /*
+        const enum QJSEmitterState {
+            None = 0,
+            FuncBody = 1,
+            BlockBody = 2,
+        }
+        */
+        const enum QJSJSVarKind {
+            Literal = 0,
+            LocalVar,
+            GlobalVar,
+            ModuleVar,
+            Arg,
+            Prop,
+            ArrayElement,
+        }
+
+        interface QJSJSVar {
+            name: string,
+            index: number, // index in stackframe
+            type: QJSJSType,
+            kind: QJSJSVarKind,
+            outer: QJSJSVar | undefined,
+            inited: boolean,
+            needsync: boolean,
+            cvar: QJSVar,
+            uses: QJSJSVar[],
+            frame: QJSFrame,
+            value: string | undefined,
+            flags: QJSJSVarFlags,
+        }
+
+        enum QJSJSVarFlags {
+            isJSCFunction = 1 << 0,
+        }
+
+        enum QJSVarFlags {
+
+        }
+
+        interface QJSVar {
+            frame: QJSFrame | undefined,
+            type: QJSCType,
+            name: string,
+            value: string | undefined,
+            needfree: boolean,
+            flags: QJSVarFlags,
+            jstype: QJSJSType, // for JSValue temp var
+            jsvar: QJSJSVar | undefined,
+            define: QJSVar | undefined,
+            use: QJSJSVar | undefined,
+        }
+
+        interface QJSFrame {
+            id: string, // for debug use.
+            in: QJSFrame[],
+            children: QJSFrame[],
+            container: Node,
+            function: Node,
+            preframe: QJSFrame | undefined,
+            needEmitReturn: boolean,
+            vars: QJSVar[],
+            jsvarmap: ESMap<string, QJSJSVar>,
+            phinodes: QJSPhiNode[];
+        }
+
+        interface QJSEmitterConfig {
+            emitUnboxNumVar: boolean,
+            enableConstantFolding: boolean,
+            enableOneArgumentFunctionCall: boolean,
+            enableLazyWriteBack: boolean, // a good alias analysis is needed if enable this option.
+            enableLazyInitMethod: boolean,
+            useCPlusPlus: boolean,
+        }
+
+        const enum QJSBlockType {
+            SourceFile = 0,
+            FuncBody,
+            NormalBlock,
+            IfThen,
+            IfElse,
+            Loop,
+            Try,
+            Catch,
+            Finally,
+        }
+
+        const enum QJSPhiKind {
+            IfPhi = 0,
+            LoopPhi,
+        }
+
+        interface QJSPhiNode {
+            kind: QJSPhiKind;
+        }
+        interface QJSIfPhiNode extends QJSPhiNode {
+            thenVars: ESMap<string, QJSJSVar>,
+            elseVars: ESMap<string, QJSJSVar>,
+            originVars: ESMap<string, QJSJSVar>,
+        }
+
+        interface QJSLoopPhiNode extends QJSPhiNode {
+            loopVars: ESMap<string, QJSJSVar>,
+        }
+/*
+        interface QJSOperator {
+
+        }
+
+        interface QJSIR {
+            Op: QJSOperator,
+            ret: QJSVar | undefined,
+            opnd1: QJSVar,
+            opnd2: QJSVar | undefined,
+            opnd3: QJSVar | undefined,
+        }
+*/
+        /* this stacks contains all locals and temp qjs vars.
+        so that we can free them when exit current frame/container */
+        let qjsCallFrames: QJSFrame[];
+        //let qjsCurFrame: QJSFrame | undefined;
+        let qjsCurBlockType: QJSBlockType;
+
+        //let qjsEndFrame: QJSFrame | undefined;
+
+        //let qjsJSVarMap: ESMap<string, QJSJSVar>;
+        let qjsEmitterState: QJSValueStackState = QJSValueStackState.None;
+        /* I intent to seperate value stack from container stack for making things clear. */
+        let qjsValueStack: QJSVar[];
+        /* symbol name management in C language */
+        let qjsGeneratedNames: Set<string>;
+        let qjsReservedScopeNames: Set<string>;
+        let qjsReservedNameStack: Set<string>[];
+
+        let qjsConfig: QJSEmitterConfig;
+
+        let qjsAtomMap: ESMap<string, QJSVar>;
+        let qjsInitFuncName: string;
+
+        // use to record all function decl, and paste them on the top of the file.
+        // currently just record the decl string. if neccesary, we can record
+        // the relationship between these functions, like parent, sibling, child etc.
+        let qjsFuncDecls: string[];
+        let qjsPauseJSEmit = false;
+
+        const enum QJSEvalType {
+            Global = 0,
+            Module,
+        }
+
+        let qjsEvalType: QJSEvalType;
+
+        const enum QJSReserved {
+            DefaultObject = "Object",
+            DefaultCtx = "ctx",
+            DefaultThisVal = "this_val",
+            DefaultArgc = "argc",
+            DefaultArgv = "argv",
+            DefaultEntryFunc = "js_eval_entry",
+            NULL = "NULL",
+            If = "if",
+            True = "TRUE",
+            False = "FALSE",
+            While = "while",
+            Break = "break",
+            Return = "return",
+            Static = "static",
+            Try = "try",
+            Catch = "catch",
+            Finally = "finally",
+            Throw = "throw",
+            JSUndefined = "JS_UNDEFINED",
+            JSUninitialized = "JS_UNINITIALIZED",
+            IntInitVal = "0",
+            DoubleInitVal = "0.0",
+            QJSTempVarName = "temp",
+            FileFuncPrefix = "js_eval_file_",
+            FuncPrefix = "js_func_",
+            InitModulePrefix = "js_init_module_",
+            InitAtomTableFunc = "js_init_atom_table",
+            FreeAtomTableFunc = "js_free_atom_table",
+            DefaultFuncCtxParam = "JSContext *ctx",
+            DefaultFuncParams = "(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)",
+            DefaultModuleFuncParams = "(JSContext *ctx, JSModuleDef *m)",
+            LTToken = "<",
+            LTEToken = "<=",
+            EqualsEqualsToken = "==",
+            JS_TAG_BOOL = "JS_TAG_BOOL",
+            JS_TAG_INT = "JS_TAG_INT",
+            JS_TAG_FLOAT64 = "JS_TAG_FLOAT64",
+            JS_TAG_UNINITIALIZED = "JS_TAG_UNINITIALIZED",
+            CV_IS_LOCAL = "is_local",
+            CV_IS_ARG = "is_arg",
+            CV_IS_LEXICAL = "is_lexical",
+            CV_VAR_INDEX = "var_idx",
+            CV_VAR_NAME = "var_name",
+            JS_CFUNC_constructor = "JS_CFUNC_constructor",
+        }
+
+        const enum QJSFunction {
+            JS_NewAtom = "JS_NewAtom",
+            JS_FreeAtom = "JS_FreeAtom",
+            JS_FreeValue = "JS_FreeValue",
+            JS_GetPropertyValue = "JS_GetPropertyValue",
+            JS_DefineGlobalVar = "JS_DefineGlobalVar",
+            JS_DefinePropertyValue = "JS_DefinePropertyValue",
+            JS_SetPropertyInternal = "JS_SetPropertyInternal",
+            JS_GetPropertyInternal = "JS_GetPropertyInternal",
+            JS_GetPropertyUint32 = "JS_GetPropertyUint32",
+            JS_GetElementValue = "JS_GetElementValue",
+            JS_SetPropertyValue = "JS_SetPropertyValue",
+            JS_SetPropertyUint32 = "JS_SetPropertyUint32",
+            JS_SetPropertyInt64 = "JS_SetPropertyInt64",
+            JS_GetGlobalVar = "JS_GetGlobalVar",
+            JS_SetGlobalVar = "JS_SetGlobalVar",
+            JS_SetAndGetModuleExportVarRefByIndex = "JS_SetAndGetModuleExportVarRefByIndex",
+            JS_GetVarRefFromModuleExport = "JS_GetVarRefFromModuleExport",
+            JS_CreateModuleVar = "js_create_module_var",
+            JS_NewInt32 = "JS_NewInt32",
+            JS_NewFloat64 = "JS_NewFloat64",
+            JS_NewCFunction = "JS_NewCFunction",
+            JS_NewCFunction2 = "JS_NewCFunction2",
+            JS_NewObject = "JS_NewObject",
+            JS_NewArray = "JS_NewArray",
+            JS_NewString = "JS_NewString",
+            JS_AddModuleExportByAtom = "JS_AddModuleExportByAtom",
+            JS_AddModuleImportByAtom = "JS_AddModuleImportByAtom",
+            JS_DefineClass = "js_define_class",
+            JS_AddReqModule = "add_req_module_entry",
+            JS_ConcatString = "JS_ConcatString",
+            JS_DefineGlobalFunction = "JS_DefineGlobalFunction",
+            JS_SetValue = "set_value",
+            JS_DupValue = "JS_DupValue",
+            JS_Call_jsc = "JS_Call_jsc",
+            JS_Call_jsc_function = "js_call_jsc_function",
+            JS_CALL_C_FUNCTION = "js_call_c_function",
+            JS_Call = "JS_Call",
+            JS_CallConstructor = "JS_CallConstructor",
+            JS_ToBool = "JS_ToBool",
+            JS_VALUE_GET_BOOL = "JS_VALUE_GET_BOOL",
+            JS_VALUE_GET_INT = "JS_VALUE_GET_INT",
+            JS_VALUE_GET_FLOAT64 = "JS_VALUE_GET_FLOAT64",
+            JS_MKVAL = "JS_MKVAL",
+            JS_VALUE_GET_TAG = "JS_VALUE_GET_TAG",
+            JS_UPDATE_SF_FUNC = "js_update_sf",
+            JS_UPDATE_SF_MACRO = "JS_UPDATE_SF",
+            JS_MODULE_FUNC_PROLOGUE = "JS_MODULE_FUNC_PROLOGUE",
+            JS_CLOSURE_JSC = "js_closure_jsc",
+            JS_COMPARE_NUMBER_INT = "jsvalue_compare_number_int",
+            JS_COMPARE_NUMBER_NUMBER = "jsvalue_compare_number_number",
+            JS_COMPARE_INT_NUMBER = "jsvalue_compare_int_number",
+            JS_IncInt = "jsvalue_inc_int",
+            JS_AddIntInt = "jsvalue_add_int_int",
+            JS_AddNumberInt = "jsvalue_add_number_int",
+            JS_AddIntNumber = "jsvalue_add_int_number",
+            JS_AddNumberNumber = "jsvalue_add_number_number",
+            JS_SubIntInt = "jsvalue_sub_int_int",
+            JS_SubNumberInt = "jsvalue_sub_number_int",
+            JS_SubIntNumber = "jsvalue_sub_int_number",
+            JS_SubNumberNumber = "jsvalue_sub_number_number",
+            JS_MulIntInt = "jsvalue_mul_int_int",
+            JS_MulNumberInt = "jsvalue_mul_number_int",
+            JS_MulIntNumber = "jsvalue_mul_int_number",
+            JS_MulNumberNumber = "jsvalue_mul_number_number",
+            JS_DivIntInt = "jsvalue_div_int_int",
+            JS_DivNumberInt = "jsvalue_div_number_int",
+            JS_DivIntNumber = "jsvalue_div_int_number",
+            JS_DivNumberNumber = "jsvalue_div_number_number",
+            JS_StrictEQ = "js_strict_eq",
+            JS_For_In_Start = "js_for_in_start2",
+            JS_For_In_Next = "js_for_in_next2",
+        }
 
         reset();
         return {
@@ -957,12 +1310,12 @@ namespace ts {
         }
 
         function printBundle(bundle: Bundle): string {
-            writeBundle(bundle, beginPrint(), /*sourceMapEmitter*/ undefined);
+            writeBundle(bundle, beginPrint(), undefined, /*sourceMapEmitter*/ undefined);
             return endPrint();
         }
 
         function printFile(sourceFile: SourceFile): string {
-            writeFile(sourceFile, beginPrint(), /*sourceMapEmitter*/ undefined);
+            writeFile(sourceFile, beginPrint(), undefined, /*sourceMapEmitter*/ undefined);
             return endPrint();
         }
 
@@ -1041,10 +1394,12 @@ namespace ts {
             return false;
         }
 
-        function writeBundle(bundle: Bundle, output: EmitTextWriter, sourceMapGenerator: SourceMapGenerator | undefined) {
+        function writeBundle(bundle: Bundle, output: EmitTextWriter, output2: EmitTextWriter | undefined, sourceMapGenerator: SourceMapGenerator | undefined) {
             isOwnFileEmit = false;
             const previousWriter = writer;
+            const previousQJSWriter = qjsWriter;
             setWriter(output, sourceMapGenerator);
+            qjsWriter = output2;
             emitShebangIfNeeded(bundle);
             emitPrologueDirectivesIfNeeded(bundle);
             emitHelpers(bundle);
@@ -1098,6 +1453,7 @@ namespace ts {
 
             reset();
             writer = previousWriter;
+            qjsWriter = previousQJSWriter;
         }
 
         function writeUnparsedSource(unparsed: UnparsedSource, output: EmitTextWriter) {
@@ -1108,15 +1464,18 @@ namespace ts {
             writer = previousWriter;
         }
 
-        function writeFile(sourceFile: SourceFile, output: EmitTextWriter, sourceMapGenerator: SourceMapGenerator | undefined) {
+        function writeFile(sourceFile: SourceFile, output: EmitTextWriter, output2: EmitTextWriter | undefined, sourceMapGenerator: SourceMapGenerator | undefined) {
             isOwnFileEmit = true;
             const previousWriter = writer;
+            const previousQjsWriter = qjsWriter;
             setWriter(output, sourceMapGenerator);
+            qjsWriter = output2;
             emitShebangIfNeeded(sourceFile);
             emitPrologueDirectivesIfNeeded(sourceFile);
             print(EmitHint.SourceFile, sourceFile, sourceFile);
             reset();
             writer = previousWriter;
+            qjsWriter = previousQjsWriter;
         }
 
         function beginPrint() {
@@ -1167,6 +1526,29 @@ namespace ts {
             currentLineMap = undefined;
             detachedCommentsInfo = undefined;
             setWriter(/*output*/ undefined, /*_sourceMapGenerator*/ undefined);
+
+            // for qjs emitter
+            qjsWriter = undefined;
+            qjsCallFrames = [];
+            //qjsCurFrame = undefined;
+            qjsCurBlockType = QJSBlockType.SourceFile;
+            //qjsEndFrame = undefined;
+
+            qjsValueStack = [];
+            qjsGeneratedNames = new Set();
+            qjsReservedNameStack = [];
+            qjsConfig = {
+                emitUnboxNumVar: false,
+                enableConstantFolding: true,
+                enableOneArgumentFunctionCall: false,
+                enableLazyWriteBack: false,
+                enableLazyInitMethod: false,
+                useCPlusPlus: true,
+            };
+            qjsAtomMap = new Map<string, QJSVar>();
+            qjsInitFuncName = "";
+            qjsEvalType = QJSEvalType.Global;
+            qjsFuncDecls = [];
         }
 
         function getCurrentLineMap() {
@@ -1865,11 +2247,100 @@ namespace ts {
         //
         // Literals/Pseudo-literals
         //
+/*
+        function emitQJSNewInt32(qjsVar: QJSVar, num: string) {
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
 
+            if (qjsVar.type === QJSCType.JSValue) {
+                writeQJSBase(generateQJSNewInt32(num));
+            }
+            else {
+                writeQJSBase(num.toString());
+            }
+
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+*/
         // SyntaxKind.NumericLiteral
         // SyntaxKind.BigIntLiteral
+        function emitQJSIntLiteral(num: Number) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+            if (qjsEmitterState !== QJSValueStackState.RValue) {
+                return;
+            }
+
+            Debug.assert(qjsEmitterState === QJSValueStackState.RValue);
+
+            const qjsVar = prepareQJSTempVar(QJSCType.Int, QJSJSType.NumLiteral);
+            qjsVar.value = num.toString();
+            qjsVar.needfree = false;
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.Int].type);
+            writeQJSSpace();
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(num.toString());
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSFloat64Literal(num: Number) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+            if (qjsEmitterState !== QJSValueStackState.RValue) {
+                return;
+            }
+
+            const qjsVar = prepareQJSTempVar(QJSCType.Double, QJSJSType.NumLiteral);
+            qjsVar.value = num.toString();
+            qjsVar.needfree = false;
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.Double].type);
+            writeQJSSpace();
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(num.toString());
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
         function emitNumericOrBigIntLiteral(node: NumericLiteral | BigIntLiteral) {
             emitLiteral(node, /*jsxAttributeEscape*/ false);
+        }
+
+        function emitQJSStringLiteral(text: string) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+            if (qjsEmitterState !== QJSValueStackState.RValue) {
+                return;
+            }
+
+            Debug.assert(qjsEmitterState === QJSValueStackState.RValue);
+
+            const qjsVar = prepareQJSTempVar(QJSCType.JSValue, QJSJSType.StringLiteral);
+            qjsVar.value = text.substring(1, text.length - 1);
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSNewString(text));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
         }
 
         // SyntaxKind.StringLiteral
@@ -1887,6 +2358,21 @@ namespace ts {
             else {
                 // Quick info expects all literals to be called with writeStringLiteral, as there's no specific type for numberLiterals
                 writeStringLiteral(text);
+
+                if (!!printerOptions.emitQJSCode) {
+                    if (node.kind === SyntaxKind.NumericLiteral) {
+                        const num = +text;
+                        if (Number.isInteger(num) && num <= 0x7fffffff) {
+                            emitQJSIntLiteral(num);
+                        }
+                        else {
+                            emitQJSFloat64Literal(num);
+                        }
+                    }
+                    else if (node.kind === SyntaxKind.StringLiteral) {
+                        emitQJSStringLiteral(text);
+                    }
+                }
             }
         }
 
@@ -1969,10 +2455,324 @@ namespace ts {
         //
         // Identifiers
         //
+/*
+        function getQJSVarByType(jsVar: QJSJSVar, ctype: QJSCType): QJSVar | undefined {
+            for (const qjsVar of jsVar.define) {
+                if (qjsVar.type === ctype) {
+                    return qjsVar;
+                }
+            }
+
+            return undefined;
+        }
+*/
+        function qjsGetCurFrame(): QJSFrame {
+            return qjsCallFrames[qjsCallFrames.length - 1];
+        }
+
+        function qjsUpdateClosestPhiNode(jsVar: QJSJSVar) {
+            let curFrame = qjsGetCurFrame();
+            switch(qjsCurBlockType) {
+                case QJSBlockType.IfThen:
+                    {
+                        curFrame = curFrame.preframe!;
+                        Debug.assert(curFrame.phinodes.length === 1);
+                        const phinode: QJSIfPhiNode = curFrame.phinodes[0] as QJSIfPhiNode;
+                        //phinode.originVars.set(innermostVar!.name, innermostVar!.outer!);
+                        phinode.thenVars.set(jsVar.name, jsVar);
+                    }
+                    break;
+                case QJSBlockType.IfElse:
+                    {
+                        curFrame = curFrame.preframe!;
+                        Debug.assert(curFrame.phinodes.length === 1);
+                        const phinode: QJSIfPhiNode = curFrame.phinodes[0] as QJSIfPhiNode;
+                        phinode.elseVars.set(jsVar.name, jsVar);
+                    }
+                    break;
+                case QJSBlockType.Loop:
+                    {
+                        curFrame = curFrame.preframe!;
+                        Debug.assert(curFrame.phinodes.length === 1);
+                        const phinode: QJSLoopPhiNode = curFrame.phinodes[0] as QJSLoopPhiNode;
+                        phinode.loopVars.set(jsVar.name, jsVar);
+                    }
+                    break;
+                default:
+                    break;
+            };
+        }
+
+        function qjsWriteBackObjectsWithSameProp(jsVar: QJSJSVar) {
+            if (jsVar.kind === QJSJSVarKind.Prop) {
+                // force to sync all object with same prop name due to aliasing.
+                const [jsobj, jsname] = jsVar.name.split("|");
+                const atomName = qjsAtomMap.get(jsname)!;
+
+                let curFrame: QJSFrame | undefined = qjsGetCurFrame();
+                const curFunc = qjsGetCurFunction(curFrame);
+                const hasWrite: Set<string> = new Set();
+
+                while (curFrame && curFunc === qjsGetCurFunction(curFrame)) {
+                    curFrame.jsvarmap.forEach((value, key) => {
+                        if (value.kind === QJSJSVarKind.Prop &&
+                            value.needsync) {
+                            const [obj, name] = key.split("|");
+                            if (jsname === name &&
+                                obj !== jsobj &&
+                                !hasWrite.has(key)) {
+                                emitQJSSetProperty(obj, atomName, value.cvar);
+                                value.needsync = false;
+
+                                hasWrite.add(key);
+                            }
+                        }
+                    });
+
+                    curFrame = curFrame.preframe;
+                }
+            }
+        }
+
+        function qjsUpdateFrame(jsVar: QJSJSVar) {
+            const qjsVar = jsVar.cvar;
+            const outerJsVar = jsVar;
+            const outerFrame = outerJsVar.frame;
+            let curFrame = qjsGetCurFrame();
+
+            if (curFrame === outerFrame) {
+
+                qjsWriteBackObjectsWithSameProp(jsVar);
+                return;
+            }
+
+            let innerVar: QJSJSVar | undefined;
+            let innermostVar: QJSJSVar | undefined;
+            while (curFrame !== outerFrame) {
+                Debug.assert(!curFrame.jsvarmap.get(outerJsVar.name));
+                const newJsVar = qjsNewJSVar(outerJsVar.name, outerJsVar.type, outerJsVar.kind, qjsVar, curFrame);
+                newJsVar.inited = outerJsVar.inited; // for global var
+
+                curFrame = curFrame.preframe!;
+
+                if (innerVar) {
+                    innerVar.outer = newJsVar;
+                }
+                innerVar = newJsVar;
+
+                if (!innermostVar) {
+                    innermostVar = newJsVar;
+                }
+            }
+
+            qjsVar.jsvar = innermostVar;
+
+            if (innerVar) {
+                innerVar.outer = outerJsVar;
+            }
+
+            qjsWriteBackObjectsWithSameProp(innermostVar!);
+
+            qjsUpdateClosestPhiNode(innermostVar!);
+
+        }
+
+        function resolveQJSIdentifierInternal(name: string): QJSJSVar | undefined {
+            let curFrame: QJSFrame | undefined = qjsGetCurFrame();
+
+            while (curFrame) {
+                const jsVarMap = curFrame.jsvarmap;
+                const jsvar = jsVarMap.get(name);
+                if (jsvar) {
+                    return jsvar;
+                }
+
+                curFrame = curFrame.preframe;
+            }
+
+            return undefined;
+        }
+
+        function qjsGetVarRefIndex(varname: string): number {
+            const frame = qjsGetCurFrame();
+            if (frame.function.kind === SyntaxKind.FunctionDeclaration) {
+                const originFunc = getParseTreeNode(frame.function);
+                for (let i = 0; i < (originFunc as FunctionDeclaration).closureVars.length; i ++) {
+                    if ((originFunc as FunctionDeclaration).closureVars[i].name === varname) {
+                        return i;
+                    }
+                }
+            }
+
+            Debug.fail("Should be unreachable.");
+            return -1;
+        }
+
+        function emitQJSDeclareClosureVar(qjsVar: QJSVar, varrefIndex: number) {
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase("var_refs[" + varrefIndex + "]->pvalue");
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function resolveQJSIdentifier(node: Identifier, ctype: QJSCType, jstype: QJSJSType = QJSJSType.Undefined) {
+            const jsName = getTextOfNode(node, /*includeTrivia*/ false);
+            // first find local var
+            const qjsJSVarMap = qjsGetCurFrame().jsvarmap;
+            let jsVar = qjsJSVarMap.get(jsName);
+
+            if (!jsVar) {
+                // find jsvar in outer frames.
+                jsVar = resolveQJSIdentifierInternal(jsName);
+
+                if(!jsVar) {
+                    // not local var or global var in this file, it's a builtin global var
+                    if (!hasGlobalName || (hasGlobalName && !hasGlobalName(jsName))) {
+                        Debug.fail("qjsEmitter: cannot resolve " + jsName);
+                    }
+
+                    const varName = generateQJSVarName(ctype, jsName);
+                    const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName, false);
+                    qjsVar.jstype = jstype;
+                    if (jstype < QJSJSType.RefType) {
+                        qjsVar.needfree = false;
+                    }
+                    pushQJSValueStack(qjsVar);
+
+                    jsVar = qjsNewJSVar(jsName, jstype, QJSJSVarKind.GlobalVar, qjsVar, qjsGetCurFrame());
+
+                    emitQJSDeclareQJSVar(qjsVar);
+                    return;
+                }
+
+                if (jsVar.kind === QJSJSVarKind.LocalVar) {
+                    if (jsVar.frame.function !== qjsGetCurFrame().function) {
+                        let jstype: QJSJSType = jsVar.type;
+                        if (jsVar.type === QJSJSType.NumLiteral) {
+                            jstype = QJSJSType.Float64;
+                        }
+                        const varName = generateQJSVarName(QJSCType.JSValue, jsName, true);
+                        const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName, false);
+                        qjsVar.jstype = jstype;
+                        if (jstype < QJSJSType.RefType) {
+                            qjsVar.needfree = false;
+                        }
+                        pushQJSValueStack(qjsVar);
+                        jsVar = qjsNewJSVar(jsVar.name, jstype, QJSJSVarKind.LocalVar, qjsVar, qjsGetCurFrame());
+                        const varrefIndex = qjsGetVarRefIndex(jsName);
+
+                        emitQJSDeclareClosureVar(qjsVar, varrefIndex);
+                        return;
+                    }
+                }
+                else if (jsVar.kind === QJSJSVarKind.GlobalVar &&
+                    qjsGetCurFunction(jsVar.frame) !==
+                    qjsGetCurFunction(qjsGetCurFrame())) {
+
+                    let jstype: QJSJSType = jsVar.type;
+                    if (jsVar.type === QJSJSType.NumLiteral) {
+                        jstype = QJSJSType.Float64;
+                    }
+
+                    const varName = generateQJSVarName(QJSCType.JSValue, jsName);
+                    const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName);
+
+                    qjsVar.jstype = jstype;
+                    if (jstype < QJSJSType.RefType) {
+                        qjsVar.needfree = false;
+                    }
+
+                    pushQJSValueStack(qjsVar);
+                    const flags = jsVar.flags;
+                    jsVar = qjsNewJSVar(jsVar.name, jstype, QJSJSVarKind.GlobalVar, qjsVar, qjsGetCurFrame());
+                    jsVar.flags = flags;
+
+                    emitQJSDeclareQJSVar(qjsVar);
+                    return;
+                }
+            }
+
+            const qjsVar = jsVar.cvar;
+
+            Debug.assert(!!qjsVar, "qjs emitter: can't set lvalue var.");
+            qjsValueStack.push(qjsVar);
+        }
+
+        function emitQJSIdentifier(node: Identifier) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            if (node.parent) {
+                if (node.parent.kind === SyntaxKind.Parameter) {
+                    return;
+                }
+
+                if (node.parent.kind === SyntaxKind.ImportSpecifier &&
+                    (node.parent as ImportSpecifier).propertyName === node) {
+                    return;
+                }
+
+                if (node.parent.kind === SyntaxKind.PropertyAccessExpression &&
+                    (node.parent as PropertyAccessExpression).name === node) {
+                    return;
+                }
+            }
+
+            const symbol = checker!.getSymbolAtLocation(node);
+            const type = checker!.getTypeAtLocation(node);
+
+            if (!symbol) {
+                Debug.fail("qjs emitter: cannot find the symbol.");
+            }
+
+            if (symbol.flags & SymbolFlags.Variable) {
+                let jstype = QJSJSType.Undefined;
+                let ctype = QJSCType.JSValue;
+                if (type.flags & TypeFlags.Number) {
+                    jstype = QJSJSType.Float64;
+                    ctype = QJSCType.Number;
+                }
+                else if (type.flags & TypeFlags.Object) {
+                    jstype = QJSJSType.Object;
+                    ctype = QJSCType.JSValue;
+                }
+                else if (type.flags & TypeFlags.String) {
+                    jstype = QJSJSType.String;
+                    ctype = QJSCType.JSValue;
+                }
+
+                resolveQJSIdentifier(node, ctype, jstype);
+            }
+            else if (symbol.flags & SymbolFlags.Function) {
+                resolveQJSIdentifier(node, QJSCType.JSValue, QJSJSType.Function);
+            }
+            else if (symbol.flags & SymbolFlags.Alias) {
+                let jstype = QJSJSType.Undefined;
+                let ctype = QJSCType.JSValue;
+                if (type.flags & TypeFlags.Number) {
+                    jstype = QJSJSType.Float64;
+                    ctype = QJSCType.Number;
+                }
+                else if (type.flags & TypeFlags.Object) {
+                    jstype = QJSJSType.Object;
+                    ctype = QJSCType.JSValue;
+                }
+                resolveQJSIdentifier(node, ctype, jstype);
+            }
+        }
 
         function emitIdentifier(node: Identifier) {
             const writeText = node.symbol ? writeSymbol : write;
             writeText(getTextOfNode(node, /*includeTrivia*/ false), node.symbol);
+
+            emitQJSIdentifier(node);
+
             emitList(node, node.typeArguments, ListFormat.TypeParameters); // Call emitList directly since it could be an array of TypeParameterDeclarations _or_ type arguments
         }
 
@@ -2449,15 +3249,112 @@ namespace ts {
         //
         // Expressions
         //
+        function emitQJSNewArray() {
+            writeQJSBase(generateQJSNewArray());
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSArrayLiteralExpression(len: number) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const array = prepareQJSTempVar(QJSCType.JSValue, QJSJSType.Object);
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSBase(array.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            emitQJSNewArray();
+
+            popQJSValueStack();
+            for (let i = len - 1; i >= 0; i --) {
+                const val = popQJSValueStack();
+                emitQJSDefineArrayElement(array, i, val);
+            }
+            pushQJSValueStack(array);
+        }
+
+        function emitQJSDefineArrayElement(array: QJSVar, index: QJSVar | number, val: QJSVar) {
+            let valcode = val.name;
+            switch (val.type) {
+                case QJSCType.Int:
+                case QJSCType.Double:
+                case QJSCType.IntLiteral:
+                case QJSCType.FloatLiteral:
+                    valcode = generateQJSMKVal(val);
+                    break;
+                default:
+                    break;
+            }
+
+            let indexCode = "";
+            if (typeof index === "number") {
+                indexCode = index.toString();
+            }
+            else {
+                switch (index.type) {
+                    case QJSCType.JSValue:
+                        indexCode = generateQJSJSValueGetInt(index);
+                        break;
+                    case QJSCType.Int:
+                        break;
+                    default:
+                        Debug.assert("qjs emitter: unexpected index type.");
+                        break;
+                }
+            }
+            writeQJSBase(generateQJSDefinePropertyValue(array, "__JS_AtomFromUInt32("+ indexCode + ")",
+                valcode, "JS_PROP_C_W_E | JS_PROP_THROW"));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            val.needfree = false;
+        }
 
         function emitArrayLiteralExpression(node: ArrayLiteralExpression) {
             const elements = node.elements;
             const preferNewLine = node.multiLine ? ListFormat.PreferNewLine : ListFormat.None;
+
             emitExpressionList(node, elements, ListFormat.ArrayLiteralExpressionElements | preferNewLine, parenthesizer.parenthesizeExpressionForDisallowedComma);
+
+            emitQJSArrayLiteralExpression(elements.length);
+        }
+
+        function emitQJSNewObject(qjsVar: QJSVar) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSNewObject());
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
         }
 
         function emitObjectLiteralExpression(node: ObjectLiteralExpression) {
             forEach(node.properties, generateMemberNames);
+
+            if (!!printerOptions.emitQJSCode) {
+                forEach(node.properties, generateQJSMemberNames);
+                let qjsVar: QJSVar;
+                if (node.parent.kind === SyntaxKind.VariableDeclaration) {
+                    qjsVar = peekQJSValueStack();
+                }
+                else {
+                    qjsVar = prepareQJSTempVar(QJSCType.JSValue, QJSJSType.Object);
+                }
+                emitQJSNewObject(qjsVar);
+
+                if (node.parent.kind === SyntaxKind.VariableDeclaration) {
+                    pushQJSValueStack(qjsVar);
+                }
+            }
 
             const indentedFlag = getEmitFlags(node) & EmitFlags.Indented;
             if (indentedFlag) {
@@ -2471,6 +3368,138 @@ namespace ts {
             if (indentedFlag) {
                 decreaseIndent();
             }
+        }
+
+        function resolveQJSProperty(node: PropertyAccessExpression, obj: QJSVar, ctype: QJSCType, jstype: QJSJSType) {
+            (ctype);
+            (jstype);
+            const propname = getTextOfNode(node.name);
+            if (!qjsAtomMap.get(propname)) {
+                const jsName = propname;
+                const varAtomName = qjsTypeInfo[QJSCType.JSAtom].prefix + jsName;
+                const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, varAtomName, true, true);
+                qjsAtomMap.set(jsName, qjsAtomVar);
+            }
+
+            const fullname = generateQJSPropSymbol(obj, propname);
+            const qjsJSVarMap = qjsGetCurFrame().jsvarmap;
+            let jsvar = qjsJSVarMap.get(fullname);
+
+            if (!jsvar) {
+                jsvar = resolveQJSIdentifierInternal(fullname);
+                if (jsvar && jsvar.kind === QJSJSVarKind.Prop &&
+                    qjsGetCurFunction(jsvar.frame) ===
+                    qjsGetCurFunction(qjsGetCurFrame())) {
+                    pushQJSValueStack(jsvar.cvar);
+                }
+                else {
+                    const qjsVar = prepareQJSTempVar(QJSCType.JSValue, jstype);
+                    jsvar = qjsNewJSVar(generateQJSPropSymbol(obj, propname), jstype, QJSJSVarKind.Prop, qjsVar);
+                    emitQJSDeclareQJSVar(qjsVar);
+                }
+            }
+            else {
+                pushQJSValueStack(jsvar.cvar);
+            }
+        }
+
+        function emitQJSPropertyAccessExpression(node: PropertyAccessExpression) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            let obj = popQJSValueStack();
+            if (obj.type === QJSCType.JSValue) {
+                if (obj.jsvar &&
+                    obj.jsvar.kind === QJSJSVarKind.GlobalVar &&
+                    !obj.jsvar.inited) {
+                        emitQJSInitGlobalVar(obj);
+                    }
+            }
+            else {
+                obj = emitQJSBoxVal(obj);
+                //Debug.fail("qjs emitter: unsupported type now.");
+            }
+
+            const symbol = checker!.getSymbolAtLocation(node.name);
+            const type = checker!.getTypeAtLocation(node.name);
+
+            if (!symbol) {
+                // perhaps an extern var, we dont know its definition.
+                //Debug.fail("qjs emitter: cannot find the symbol.");
+            }
+
+            //if (obj.jstype === QJSJSType.Function) {
+            //    popQJSValueStack(); // drop "this" object in the case of Object.method.call(xxx).
+            //}
+
+            let jstype = QJSJSType.Undefined;
+            let ctype = QJSCType.JSValue;
+            if (!!symbol && symbol.flags & SymbolFlags.Property) {
+                if (type.flags & TypeFlags.Number) {
+                    ctype = QJSCType.Number;
+                    jstype = QJSJSType.Float64;
+                }
+                else if (type.flags & TypeFlags.Object) {
+                    ctype = QJSCType.JSValue;
+                    jstype = QJSJSType.Object;
+                }
+                resolveQJSProperty(node, obj, ctype, jstype);
+                const prop = peekQJSValueStack();
+                if (qjsEmitterState === QJSValueStackState.RValue &&
+                    !prop.jsvar!.inited) {
+                    emitQJSGetProperty(prop);
+                }
+            }
+            else if (!!symbol && symbol.flags & SymbolFlags.Method) {
+                jstype = QJSJSType.Function;
+                ctype = QJSCType.JSValue;
+
+                if (node.parent.kind === SyntaxKind.CallExpression) {
+                    // push "this" object.
+                    pushQJSValueStack(obj);
+                }
+
+                resolveQJSProperty(node, obj, ctype, jstype);
+                if (!qjsConfig.enableLazyInitMethod) {
+                    const prop = popQJSValueStack();
+                    const qjsVar = emitQJSGetProperty(prop);
+                    pushQJSValueStack(qjsVar);
+                }
+            }
+            else  if (!symbol) {
+                ctype = QJSCType.JSValue;
+                jstype = QJSJSType.Any;
+
+                resolveQJSProperty(node, obj, ctype, jstype);
+                const prop = peekQJSValueStack();
+                if (qjsEmitterState === QJSValueStackState.RValue &&
+                    !prop.jsvar!.inited) {
+                    emitQJSGetProperty(prop);
+                }
+            }
+            else {
+                Debug.fail("qjs emitter: unsupported type in emitQJSPropertyAccessExpression");
+            }
+
+            return;
+/*
+            const propname = getTextOfNode(node.name);
+
+            const qjsJSVarMap = qjsGetCurFrame().jsvarmap;
+            let jsvar = qjsJSVarMap.get(generateQJSPropSymbol(obj, propname));
+            let retVal: QJSVar;
+            if (!jsvar) {
+                const qjsVar = prepareQJSTempVar(QJSCType.JSValue, jstype);
+                jsvar = qjsNewJSVar(generateQJSPropSymbol(obj, propname), jstype, QJSJSVarKind.Prop, qjsVar);
+                emitQJSDeclareQJSVar(qjsVar);
+
+            }
+            else {
+                retVal = jsvar.cvar;
+                pushQJSValueStack(retVal);
+            }
+*/
         }
 
         function emitPropertyAccessExpression(node: PropertyAccessExpression) {
@@ -2499,6 +3528,9 @@ namespace ts {
             }
             writeLinesAndIndent(linesAfterDot, /*writeSpaceIfNotIndenting*/ false);
             emit(node.name);
+
+            emitQJSPropertyAccessExpression(node);
+
             decreaseIndentIf(linesBeforeDot, linesAfterDot);
         }
 
@@ -2522,12 +3554,349 @@ namespace ts {
             }
         }
 
+        function emitQJSElementAccessInternal(node: ElementAccessExpression, array: QJSVar, index: QJSVar) {
+            // object symbol
+            const symbol = checker!.getSymbolAtLocation(node.expression);
+            // result type
+            const type = checker!.getTypeAtLocation(node);
+
+            // key symbol
+            //const symbolKey = checker!.getSymbolAtLocation(node.argumentExpression);
+            // key type
+            const typeKey = checker!.getTypeAtLocation(node.argumentExpression);
+
+            if (!symbol) {
+                Debug.fail("qjs emitter: cannot find the symbol.");
+            }
+
+            //if (!symbolKey) {
+            //    Debug.fail("qjs emitter: cannot find the key symbol.");
+            //}
+
+            let jstype = QJSJSType.Undefined;
+            let ctype = QJSCType.JSValue;
+            if (type.flags & TypeFlags.Number) {
+                ctype = QJSCType.JSValue;
+                jstype = QJSJSType.Float64;
+            }
+            else if (type.flags & TypeFlags.String) {
+                ctype = QJSCType.JSValue;
+                jstype = QJSJSType.String;
+            }
+            else {
+                Debug.fail("qjs emitter: unsupported type now.");
+            }
+
+            Debug.assert(qjsEmitterState !== QJSValueStackState.LValue);
+            if (typeKey.flags & TypeFlags.NumberLiteral) {
+                const ret = prepareQJSTempVar(ctype, jstype);
+                writeQJSKeyword(qjsTypeInfo[ctype].type);
+                writeQJSSpace();
+                index.jstype = QJSJSType.NumLiteral;
+                if (index.jsvar) {
+                    index.jsvar.type = index.jstype;
+                }
+                emitQJSGetElement(array, index, ret);
+            }
+            else if (typeKey.flags & TypeFlags.Number) {
+                const ret = prepareQJSTempVar(ctype, jstype);
+                writeQJSKeyword(qjsTypeInfo[ctype].type);
+                writeQJSSpace();
+                index.jstype = QJSJSType.Float64;
+                if (index.jsvar) {
+                    index.jsvar.type = index.jstype;
+                }
+                emitQJSGetElement(array, index, ret);
+            }
+            else if (typeKey.flags & TypeFlags.String) {
+                const ret = prepareQJSTempVar(ctype, jstype);
+                writeQJSKeyword(qjsTypeInfo[ctype].type);
+                writeQJSSpace();
+                index.jstype = QJSJSType.String;
+                if (index.jsvar) {
+                    index.jsvar.type = index.jstype;
+                }
+                emitQJSGetElement(array, index, ret);
+            }
+        }
+
+        function emitQJSElementAccessExpression(node: ElementAccessExpression) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const index = popQJSValueStack();
+            const array = popQJSValueStack();
+
+            if (qjsEmitterState === QJSValueStackState.LValue) {
+                pushQJSValueStack(array);
+                pushQJSValueStack(index);
+            }
+            else {
+                emitQJSElementAccessInternal(node, array, index);
+            }
+        }
+
         function emitElementAccessExpression(node: ElementAccessExpression) {
+            const savedEmitterState = qjsEmitterState;
+            qjsEmitterState = QJSValueStackState.RValue;
             emitExpression(node.expression, parenthesizer.parenthesizeLeftSideOfAccess);
+
             emit(node.questionDotToken);
             emitTokenWithComment(SyntaxKind.OpenBracketToken, node.expression.end, writePunctuation, node);
+
+            qjsEmitterState = QJSValueStackState.RValue;
             emitExpression(node.argumentExpression);
+
+            qjsEmitterState = savedEmitterState;
+            emitQJSElementAccessExpression(node);
             emitTokenWithComment(SyntaxKind.CloseBracketToken, node.argumentExpression.end, writePunctuation, node);
+        }
+
+        function emitQJSFunctionCall(node: CallExpression) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const count = node.arguments.length;
+            const symbol = checker!.getSymbolAtLocation(node.expression);
+
+            const type = checker!.getTypeAtLocation(node.expression);
+            const signature = checker!.getSignaturesOfType(type, SignatureKind.Call);
+            const retType = checker!.getReturnTypeOfSignature(signature[0]); //there could be multiple signatures.
+
+            if (!symbol) {
+                Debug.fail("qjs emitter: cannot find the symbol.");
+            }
+
+            let args = "";
+            const freeArgsList: QJSVar[] = [];
+            if (count === 0) {
+                args = QJSReserved.NULL;
+            }
+            else if (count > 1 || !qjsConfig.enableOneArgumentFunctionCall) {
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                const argvName = generateQJSTempVarName(QJSCType.JSValue);
+                writeQJSBase(argvName);
+                writeQJSPunctuation("[");
+                writeQJSKeyword(count.toString());
+                writeQJSPunctuation("]");
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+
+                let index = 0;
+                for (const _ of node.arguments) {
+                    const val = popQJSValueStack();
+                    /*
+                    if (arg.jsvar || arg.type === QJSCType.JSValue) {
+                        args += arg.name;
+                    }
+                    else {
+                        args += generateQJSMKVal(arg);
+                    }
+                    if (param !== node.arguments[count - 1]) {
+                        args += ", ";
+                    }
+                    */
+                    let valcode = "";
+                    if (val.jstype === QJSJSType.NumLiteral ||
+                        val.type === QJSCType.Int ||
+                        val.type === QJSCType.Double ||
+                        val.type === QJSCType.Bool) {
+                        valcode = generateQJSMKVal(val);
+                    }
+                    else if (val.type === QJSCType.JSValue) {
+                        valcode = generateQJSDupValue(val);
+                    }
+                    else {
+                        Debug.fail("qjs emitter: unsuported type now.");
+                    }
+                    const argId = node.arguments.length - index - 1;
+                    const argName = argvName + "[" + argId.toString() + "]";
+                    writeQJSBase(argName);
+                    writeQJSSpace();
+                    writeQJSPunctuation("=");
+                    writeQJSSpace();
+                    writeQJSBase(valcode);
+                    writeQJSTrailingSemicolon();
+                    writeQJSLine();
+
+                    const newVar = qjsNewVar(undefined, QJSCType.JSValue, argName);
+                    if (val.type === QJSCType.Int ||
+                        val.type === QJSCType.Double ||
+                        val.type === QJSCType.Bool ||
+                        val.jstype === QJSJSType.NumLiteral ||
+                        val.jstype === QJSJSType.Bool) {
+                        newVar.jstype = val.jstype;
+                        newVar.needfree = false;
+                    }
+
+                    if (newVar.type === QJSCType.JSValue) {
+                        freeArgsList.push(newVar);
+                    }
+                    index ++;
+                }
+
+                args = argvName;
+            }
+            else {
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                const argvName = generateQJSTempVarName(QJSCType.JSValue);
+                writeQJSBase(argvName);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+
+                let valcode = "";
+                let needfree = false;
+                const arg = popQJSValueStack();
+                if (arg.jstype === QJSJSType.NumLiteral ||
+                    arg.type === QJSCType.Int ||
+                    arg.type === QJSCType.Double) {
+                    if (arg.type === QJSCType.JSValue) {
+                        valcode = arg.name;
+                    }
+                    else {
+                        valcode = generateQJSMKVal(arg);
+                    }
+                }
+                else if (arg.jstype === QJSJSType.Bool ||
+                    arg.jstype === QJSJSType.Int32 ||
+                    arg.jstype === QJSJSType.Float64) {
+                    valcode = arg.name;
+                }
+                else if (arg.type === QJSCType.JSValue) {
+                    valcode = generateQJSDupValue(arg);
+                    needfree = true;
+                }
+                else {
+                    Debug.fail("qjs emitter: unsuported type now.");
+                }
+
+                writeQJSBase(valcode);
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+
+                qjsNewVar(undefined, QJSCType.JSValue, argvName, needfree);
+
+                args = "&" + argvName;
+            }
+
+            qjsWriteBackObjects();
+
+            const func = popQJSValueStack();
+
+            if (func.jsvar &&
+                !func.jsvar.inited) {
+                if (func.jsvar.kind === QJSJSVarKind.GlobalVar) {
+                    emitQJSInitGlobalVar(func);
+                }
+                else if (func.jsvar.kind === QJSJSVarKind.Prop) {
+                    emitQJSInitProp(func);
+                }
+            }
+
+            let jsType = QJSJSType.Unknown;
+            if (retType.flags & TypeFlags.Number) {
+                jsType = QJSJSType.Float64;
+            }
+            else if (retType.flags & TypeFlags.String) {
+                jsType = QJSJSType.String;
+            }
+            else if (retType.flags & TypeFlags.Boolean) {
+                jsType = QJSJSType.Bool;
+            }
+            else if (retType.flags & TypeFlags.Object) {
+                jsType = QJSJSType.Object;
+            }
+            else if (retType.flags & TypeFlags.TypeParameter) {
+                jsType = QJSJSType.Any;
+            }
+            else if (!(retType.flags & TypeFlags.Void)) {
+                Debug.fail("qjs emitter: unsupported ret type right now.");
+            }
+
+            let thisObj: string = QJSReserved.JSUndefined;
+            let emitFunc;
+            if (func.jsvar && (func.jsvar.flags & QJSJSVarFlags.isJSCFunction)) {
+                emitFunc = emitQJSCallJscFunction;
+            }
+            else if (node.expression.kind === SyntaxKind.PropertyAccessExpression) {
+                const thisObjVar = popQJSValueStack();
+                thisObj = thisObjVar.name;
+                emitFunc = emitQJSCallFunction;
+            }
+            else {
+                emitFunc = emitQJSCallFunction;
+            }
+
+            if (!(retType.flags & TypeFlags.Void)) {
+                // return value
+                const retVar = prepareQJSTempVar(QJSCType.JSValue, jsType);
+
+                //const cfuncName = QJSReserved.FuncPrefix + funcName.jsvar!.name;
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                writeQJSKeyword(retVar.name);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+            }
+
+            emitFunc();
+/*
+            if (count > 1 || !qjsConfig.enableOneArgumentFunctionCall) {
+                freeArgsList.forEach((value) => {
+                    emitQJSFreeValue(value);
+                });
+            }
+*/
+            qjsResetObjects();
+
+            function emitQJSCallJscFunction() {
+                writeQJSKeyword(QJSFunction.JS_Call_jsc);
+                writeQJSPunctuation("(");
+                writeQJSKeyword(QJSReserved.DefaultCtx);
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSKeyword(func.name);
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSKeyword(thisObj);
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSBase(count.toString());
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSBase(args);
+                writeQJSPunctuation(")");
+                //writeQJSPunctuation(", 2)");
+                writeQJSTrailingSemicolon();
+                writeQJSLine(2);
+            }
+
+            function emitQJSCallFunction() {
+                writeQJSKeyword(QJSFunction.JS_Call);
+                writeQJSPunctuation("(");
+                writeQJSKeyword(QJSReserved.DefaultCtx);
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSKeyword(func.name);
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSKeyword(thisObj);
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSBase(count.toString());
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSBase(args);
+                writeQJSPunctuation(")");
+                writeQJSTrailingSemicolon();
+                writeQJSLine(2);
+            }
         }
 
         function emitCallExpression(node: CallExpression) {
@@ -2544,7 +3913,139 @@ namespace ts {
             }
             emit(node.questionDotToken);
             emitTypeArguments(node, node.typeArguments);
+            qjsEmitterState = QJSValueStackState.RValue;
             emitExpressionList(node, node.arguments, ListFormat.CallExpressionArguments, parenthesizer.parenthesizeExpressionForDisallowedComma);
+            emitQJSFunctionCall(node);
+        }
+
+        function emitQJSNewExpression(node: NewExpression) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const count = node.arguments ? node.arguments.length : 0;
+            const symbol = checker!.getSymbolAtLocation(node.expression);
+
+            const type = checker!.getTypeAtLocation(node.expression);
+            const signature = checker!.getSignaturesOfType(type, SignatureKind.Call);
+            const retType = checker!.getReturnTypeOfSignature(signature[0]);
+
+            Debug.assert(retType.flags & TypeFlags.Object);
+
+            if (!symbol) {
+                Debug.fail("qjs emitter: cannot find the symbol.");
+            }
+
+            let args = "";
+            const freeArgsList: QJSVar[] = [];
+            if (count === 0) {
+                args = QJSReserved.NULL;
+            }
+            else {
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                const argvName = generateQJSTempVarName(QJSCType.JSValue);
+                writeQJSBase(argvName);
+                writeQJSPunctuation("[");
+                writeQJSKeyword(count.toString());
+                writeQJSPunctuation("]");
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+
+                let index = 0;
+                for (const _ of node.arguments!) {
+                    const val = popQJSValueStack();
+                    let valcode = "";
+                    if (val.jstype === QJSJSType.NumLiteral ||
+                        val.type === QJSCType.Int ||
+                        val.type === QJSCType.Double ||
+                        val.type === QJSCType.Bool) {
+                        valcode = generateQJSMKVal(val);
+                    }
+                    else if (val.type === QJSCType.JSValue) {
+                        valcode = generateQJSDupValue(val);
+                    }
+                    else {
+                        Debug.fail("qjs emitter: unsuported type now.");
+                    }
+                    const argId = node.arguments!.length - index - 1;
+                    const argName = argvName + "[" + argId.toString() + "]";
+                    writeQJSBase(argName);
+                    writeQJSSpace();
+                    writeQJSPunctuation("=");
+                    writeQJSSpace();
+                    writeQJSBase(valcode);
+                    writeQJSTrailingSemicolon();
+                    writeQJSLine();
+
+                    const newVar = qjsNewVar(undefined, QJSCType.JSValue, argName);
+                    if (val.type === QJSCType.Int ||
+                        val.type === QJSCType.Double ||
+                        val.type === QJSCType.Bool ||
+                        val.jstype === QJSJSType.NumLiteral ||
+                        val.jstype === QJSJSType.Bool) {
+                        newVar.jstype = val.jstype;
+                        newVar.needfree = false;
+                    }
+
+                    if (newVar.type === QJSCType.JSValue) {
+                        freeArgsList.push(newVar);
+                    }
+                    index ++;
+                }
+
+                args = argvName;
+            }
+
+            qjsWriteBackObjects();
+
+            const func = popQJSValueStack();
+
+            if (func.jsvar &&
+                !func.jsvar.inited) {
+                if (func.jsvar.kind === QJSJSVarKind.GlobalVar) {
+                    emitQJSInitGlobalVar(func);
+                }
+                else {
+                    Debug.fail("qjs emitter: unsuported now.");
+                }
+            }
+
+            const jsType = QJSJSType.Object;
+            const emitFunc =  emitQJSCallCtorFunction;
+
+            const retVar = prepareQJSTempVar(QJSCType.JSValue, jsType);
+
+            //const cfuncName = QJSReserved.FuncPrefix + funcName.jsvar!.name;
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(retVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+
+            emitFunc();
+
+            qjsResetObjects();
+
+            function emitQJSCallCtorFunction() {
+                writeQJSKeyword(QJSFunction.JS_CallConstructor);
+                writeQJSPunctuation("(");
+                writeQJSKeyword(QJSReserved.DefaultCtx);
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSKeyword(func.name);
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSBase(count.toString());
+                writeQJSPunctuation(",");
+                writeQJSSpace();
+                writeQJSBase(args);
+                writeQJSPunctuation(")");
+                writeQJSTrailingSemicolon();
+                writeQJSLine(2);
+            }
+
         }
 
         function emitNewExpression(node: NewExpression) {
@@ -2553,6 +4054,7 @@ namespace ts {
             emitExpression(node.expression, parenthesizer.parenthesizeExpressionOfNew);
             emitTypeArguments(node, node.typeArguments);
             emitExpressionList(node, node.arguments, ListFormat.NewExpressionArguments, parenthesizer.parenthesizeExpressionForDisallowedComma);
+            emitQJSNewExpression(node);
         }
 
         function emitTaggedTemplateExpression(node: TaggedTemplateExpression) {
@@ -2631,12 +4133,95 @@ namespace ts {
             emitExpression(node.expression, parenthesizer.parenthesizeOperandOfPrefixUnary);
         }
 
+        function emitQJSExclamationExpression() {
+            const val = popQJSValueStack();
+
+            const ret = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+            writeQJSKeyword(qjsTypeInfo[ret.type].type);
+            writeQJSSpace();
+            writeQJSKeyword(ret.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+
+            if (val.type === QJSCType.Int ||
+                val.type === QJSCType.Bool) {
+                writeQJSPunctuation("!");
+                writeQJSKeyword(val.name);
+            }
+            else if (val.type === QJSCType.JSValue) {
+                if (val.jstype === QJSJSType.Bool ||
+                    val.jstype === QJSJSType.Int32) {
+                    writeQJSBase(generateQJSJSValueGetInt(val));
+                    writeQJSBase(" == 0");
+                }
+                else {
+                    writeQJSPunctuation("!");
+                    writeQJSBase(generateQJSJSToBool(val));
+                }
+            }
+            else {
+                Debug.fail("qjs emitter: unsupported exclamation type right now.");
+            }
+
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSPlusPlusExpression() {
+            const val = popQJSValueStack();
+
+            function generateQJSIncNumFunc(func: string, val: string) {
+                return func + "(ctx, " + val + ")";
+            }
+
+            if (val.type === QJSCType.JSValue) {
+                if (val.jstype === QJSJSType.Int32 ||
+                    val.jstype === QJSJSType.NumLiteral ||
+                    val.jstype === QJSJSType.Float64) {
+                    writeQJSBase(generateQJSIncNumFunc(QJSFunction.JS_IncInt, "&" + val.name));
+                }
+                else {
+                    Debug.fail("qjs emitter: unsupported plusplus type right now.");
+                }
+            }
+            else {
+                Debug.fail("qjs emitter: unsupported plusplus type right now.");
+            }
+
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            if (qjsEmitterState !== QJSValueStackState.None) {
+                pushQJSValueStack(val);
+            }
+        }
+
+        function emitQJSPrefixUnaryExpression(node: PrefixUnaryExpression) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            switch(node.operator) {
+                case SyntaxKind.ExclamationToken:
+                    emitQJSExclamationExpression();
+                    break;
+                case SyntaxKind.PlusPlusToken:
+                    emitQJSPlusPlusExpression();
+                    break;
+                default:
+                    Debug.fail("qjs emitter: unsupported prefix unary token right now.");
+                    break;
+            }
+        }
+
         function emitPrefixUnaryExpression(node: PrefixUnaryExpression) {
             writeTokenText(node.operator, writeOperator);
             if (shouldEmitWhitespaceBeforeOperand(node)) {
                 writeSpace();
             }
             emitExpression(node.operand, parenthesizer.parenthesizeOperandOfPrefixUnary);
+            emitQJSPrefixUnaryExpression(node);
         }
 
         function shouldEmitWhitespaceBeforeOperand(node: PrefixUnaryExpression) {
@@ -2661,6 +4246,1301 @@ namespace ts {
         function emitPostfixUnaryExpression(node: PostfixUnaryExpression) {
             emitExpression(node.operand, parenthesizer.parenthesizeOperandOfPostfixUnary);
             writeTokenText(node.operator, writeOperator);
+        }
+
+        function emitQJSBinaryExpressionCompBothNumLiteral(qjsLeft: QJSVar, qjsRight: QJSVar, operator: SyntaxKind) {
+            const retVar = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+
+            switch (operator) {
+                case SyntaxKind.LessThanEqualsToken:
+                {
+                    const ret = ((+qjsLeft.value!) <= (+qjsRight.value!));
+                    retVar.value = ret.toString();
+                }
+                    break;
+                case SyntaxKind.EqualsEqualsEqualsToken:
+                {
+                    const ret = ((+qjsLeft.value!) === (+qjsRight.value!));
+                    retVar.value = ret.toString();
+                }
+                    break;
+                default:
+                    Debug.log(`QJS emitter: unsupported binary expression operator ${operator}.`);
+                    break;
+            }
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.Bool].type);
+            writeQJSSpace();
+            writeQJSKeyword(retVar.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(retVar.value!);
+            writeQJSTrailingSemicolon();
+            writeQJSLine(2);
+        }
+
+        function emitQJSBinaryExpressionCompBothInt(qjsLeft: QJSVar, qjsRight: QJSVar, operator: SyntaxKind) {
+            const retVar = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+
+            const valLeft = qjsLeft.type === QJSCType.JSValue ? generateQJSJSValueGetInt(qjsLeft) : qjsLeft.name;
+            const valRight = qjsRight.type === QJSCType.JSValue ? generateQJSJSValueGetInt(qjsRight) : qjsRight.name;
+
+            let token: string;
+            switch (operator) {
+                case SyntaxKind.LessThanEqualsToken:
+                    token = QJSReserved.LTEToken;
+                    break;
+                case SyntaxKind.LessThanToken:
+                    token = QJSReserved.LTEToken;
+                    break;
+                case SyntaxKind.EqualsEqualsEqualsToken:
+                    token = QJSReserved.EqualsEqualsToken;
+                    break;
+                default:
+                    Debug.log(`QJS emitter: unsupported binary expression operator ${operator}.`);
+                    token = "??";
+                    break;
+
+            }
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.Bool].type);
+            writeQJSSpace();
+            writeQJSKeyword(retVar.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSPunctuation("(");
+            writeQJSBase(valLeft);
+            writeQJSSpace();
+            writeQJSBase(token);
+            writeQJSSpace();
+            writeQJSBase(valRight);
+            writeQJSPunctuation(")");
+            writeQJSTrailingSemicolon();
+            writeQJSLine(2);
+        }
+
+        function generateQJSCompareFunc(func: QJSFunction, ret: QJSVar, left: QJSVar, right: QJSVar, op: SyntaxKind): string {
+            let token: string;
+            switch (op) {
+                case SyntaxKind.LessThanEqualsToken:
+                    token = QJSReserved.LTEToken;
+                    break;
+                case SyntaxKind.LessThanToken:
+                    token = QJSReserved.LTToken;
+                    break;
+                case SyntaxKind.EqualsEqualsEqualsToken:
+                    token = QJSReserved.EqualsEqualsToken;
+                    break;
+                default:
+                    Debug.log(`QJS emitter: unsupported binary expression operator ${op}.`);
+                    token = "??";
+                    break;
+
+            }
+            return func + "(" + ret.name + ", " + left.name + ", " + right.name + ", " + token + ")";
+        }
+
+        function emitQJSBinaryExpressionCompNumSlowPath(qjsLeft: QJSVar, qjsRight: QJSVar, operator: SyntaxKind) {
+            const retVar = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+            writeQJSKeyword(qjsTypeInfo[QJSCType.Bool].type);
+            writeQJSSpace();
+            writeQJSKeyword(retVar.name);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            if (qjsLeft.type === QJSCType.JSValue &&
+                qjsRight.type === QJSCType.JSValue) {
+                writeQJSBase(generateQJSCompareFunc(QJSFunction.JS_COMPARE_NUMBER_NUMBER, retVar, qjsLeft, qjsRight, operator));
+            }
+            else if (qjsLeft.type === QJSCType.JSValue) {
+                writeQJSBase(generateQJSCompareFunc(QJSFunction.JS_COMPARE_NUMBER_INT, retVar, qjsLeft, qjsRight, operator));
+            }
+            else {
+                writeQJSBase(generateQJSCompareFunc(QJSFunction.JS_COMPARE_INT_NUMBER, retVar, qjsLeft, qjsRight, operator));
+            }
+
+            writeQJSTrailingSemicolon();
+            writeQJSLine(2);
+        }
+
+        function generateQJSLogicOperator(operator: SyntaxKind): string {
+            switch (operator) {
+                case SyntaxKind.AmpersandAmpersandToken:
+                    return "&&";
+                    break;
+                default:
+                    break;
+            }
+
+            return "";
+        }
+
+        function emitQJSBinaryExpressionLogic(operator: SyntaxKind) {
+            const qjsRight = popQJSValueStack();
+            const qjsLeft = popQJSValueStack();
+
+            const ret = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+            writeQJSKeyword(qjsTypeInfo[QJSCType.Bool].type);
+            writeQJSSpace();
+            writeQJSBase(ret.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+
+            if (qjsLeft.type === QJSCType.Bool) {
+                writeQJSBase(qjsLeft.name);
+            }
+            else if (qjsLeft.type === QJSCType.JSValue) {
+                writeQJSBase(generateQJSJSValueGetBool(qjsLeft));
+            }
+            else {
+                Debug.fail("qjs emitter: unexpected type.");
+            }
+
+            writeQJSSpace();
+            writeQJSBase(generateQJSLogicOperator(operator));
+            writeQJSSpace();
+
+            if (qjsRight.type === QJSCType.Bool) {
+                writeQJSBase(qjsRight.name);
+            }
+            else if (qjsRight.type === QJSCType.JSValue) {
+                writeQJSBase(generateQJSJSValueGetBool(qjsRight));
+            }
+            else {
+                Debug.fail("qjs emitter: unexpected type.");
+            }
+
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSBinaryExpressionCompNum(operator: SyntaxKind) {
+            const qjsRight = popQJSValueStack();
+            const qjsLeft = popQJSValueStack();
+
+            if (qjsRight.type === QJSCType.JSValue ||
+                qjsLeft.type === QJSCType.JSValue) {
+                // JSValue
+                if (qjsRight.jstype === QJSJSType.Int32 &&
+                    qjsLeft.jstype === QJSJSType.Int32) {
+                    emitQJSBinaryExpressionCompBothInt(qjsLeft, qjsRight, operator);
+                }
+                else {
+                    emitQJSBinaryExpressionCompNumSlowPath(qjsLeft, qjsRight, operator);
+                }
+            }
+            else {
+                // raw data
+                if (qjsLeft.jsvar) {
+                    //it's a JS var.
+                    if (qjsLeft.jstype === qjsRight.jstype) {
+                        switch (qjsRight.jstype) {
+                            case QJSJSType.NumLiteral:
+                                emitQJSBinaryExpressionCompBothNumLiteral(qjsLeft, qjsRight, operator);
+                                break;
+                            case QJSJSType.Int32:
+                                emitQJSBinaryExpressionCompBothInt(qjsLeft, qjsRight, operator);
+                                break;
+                            case QJSJSType.Float64:
+                                break;
+                            default:
+                                Debug.fail(`QJS emitter: unsupported type in emitQJSBinaryExpressionComp.`);
+                                break;
+                        }
+
+                    }
+                    else {
+                        emitQJSBinaryExpressionCompNumSlowPath(qjsLeft, qjsRight, operator);
+                    }
+                }
+                else {
+                    if (qjsLeft.jstype === qjsRight.jstype) {
+                        switch (qjsRight.jstype) {
+                            case QJSJSType.NumLiteral:
+                                emitQJSBinaryExpressionCompBothNumLiteral(qjsLeft, qjsRight, operator);
+                                break;
+                            case QJSJSType.Int32:
+                                emitQJSBinaryExpressionCompBothInt(qjsLeft, qjsRight, operator);
+                                break;
+                            case QJSJSType.Float64:
+                                break;
+                            default:
+                                Debug.fail(`QJS emitter: unsupported type in emitQJSBinaryExpressionComp.`);
+                                break;
+                        }
+                    }
+                    else {
+                        emitQJSBinaryExpressionCompNumSlowPath(qjsLeft, qjsRight, operator);
+                    }
+                }
+            }
+        }
+
+        function generateQJSJSStrictEQ(left: QJSVar, right: QJSVar): string {
+            let leftVar = left.name;
+            let rightVar = right.name;
+            if (left.type !== QJSCType.JSValue) {
+                leftVar = generateQJSMKVal(left);
+            }
+
+            if (right.type !== QJSCType.JSValue) {
+                rightVar = generateQJSMKVal(right);
+            }
+
+
+            return QJSFunction.JS_StrictEQ + "(ctx, " + leftVar + ", " + rightVar + ")";
+        }
+
+        function generateQJSJSForInStart(obj: QJSVar, ret: QJSVar) {
+            return QJSFunction.JS_For_In_Start + "(ctx, " + obj.name + ", &" + ret.name + ")";
+        }
+
+        function generateQJSJSForInNext(emuObj: QJSVar, val: QJSVar, ret: QJSVar) {
+            val.jstype = QJSJSType.Object;
+            val.jsvar!.inited = true;
+            val.needfree = true;
+            return QJSFunction.JS_For_In_Next + "(ctx, " + emuObj.name + ", &" + val.name + ", &" + ret.name +")";
+        }
+
+        function emitQJSBinaryExpressionStrictEquals() {
+            const qjsRight = popQJSValueStack();
+            const qjsLeft = popQJSValueStack();
+
+            if (qjsLeft.type === QJSCType.Int ||
+                qjsLeft.type === QJSCType.Double ||
+                qjsLeft.type === QJSCType.Number ||
+                qjsLeft.type === QJSCType.Bool ||
+                qjsLeft.type === QJSCType.IntLiteral ||
+                qjsLeft.type === QJSCType.FloatLiteral ||
+                qjsLeft.jstype === QJSJSType.Int32 ||
+                qjsLeft.jstype === QJSJSType.Float64 ||
+                qjsLeft.jstype === QJSJSType.Bool ||
+                qjsLeft.jstype === QJSJSType.NumLiteral) {
+                pushQJSValueStack(qjsLeft);
+                pushQJSValueStack(qjsRight);
+                emitQJSBinaryExpressionCompNum(SyntaxKind.EqualsEqualsEqualsToken);
+            }
+            else {
+                const ret = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+                writeQJSKeyword(qjsTypeInfo[ret.type].type);
+                writeQJSSpace();
+                writeQJSBase(ret.name);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+
+                writeQJSBase(generateQJSJSStrictEQ(qjsLeft, qjsRight));
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+        }
+
+        function emitQJSDeclareQJSVar(qjsVar: QJSVar) {
+            writeQJSKeyword(qjsTypeInfo[qjsVar.type].type);
+            writeQJSSpace();
+            writeQJSKeyword(qjsVar.name);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSInitGlobalVar(qjsVar: QJSVar) {
+            let atom = qjsAtomMap.get(qjsVar.jsvar!.name)!;
+            if (!atom) {
+                const jsName = qjsVar.jsvar!.name;
+                const varAtomName = qjsTypeInfo[QJSCType.JSAtom].prefix + jsName;
+                const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, varAtomName, true, true);
+                qjsAtomMap.set(jsName, qjsAtomVar);
+                atom = qjsAtomVar;
+            }
+
+            //writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            //writeQJSSpace();
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSGetGlobalVar(atom));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            qjsVar.jsvar!.inited = true;
+            qjsVar.needfree = true;
+        }
+
+        function emitQJSInitProp(qjsVar: QJSVar) {
+            emitQJSGetProperty(qjsVar);
+        }
+
+        function emitQJSBinaryExpressionEqualsTo(node: BinaryExpression) {
+            const qjsRight = popQJSValueStack();
+
+            if (qjsRight.jsvar && !qjsRight.jsvar.inited) {
+                if (qjsRight.jsvar.kind === QJSJSVarKind.GlobalVar) {
+                    emitQJSInitGlobalVar(qjsRight);
+                }
+                else if (qjsRight.jsvar.kind === QJSJSVarKind.Prop) {
+                    emitQJSGetProperty(qjsRight);
+                }
+            }
+
+            if (node.left.kind === SyntaxKind.ElementAccessExpression) {
+                const index = popQJSValueStack();
+                const array = popQJSValueStack();
+
+                const tempVar = emitQJSBoxVal(qjsRight);
+
+                if ((index.type === QJSCType.IntLiteral ||
+                    index.type === QJSCType.Int) &&
+                    index.value) {
+                    writeQJSBase(generateQJSSetPropertyInt(array, index, tempVar));
+                    tempVar.needfree = false;
+                }
+                else {
+                    writeQJSBase(generateQJSSetPropertyInt64(array, index, tempVar));
+                    tempVar.needfree = false;
+                }
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+            else {
+                const qjsLeft = popQJSValueStack();
+
+                qjsUpdateFrame(qjsLeft.jsvar!);
+
+                if (qjsLeft.jsvar && !qjsLeft.jsvar.inited &&
+                    (qjsLeft.jsvar.kind === QJSJSVarKind.GlobalVar ||
+                    qjsLeft.jsvar.kind === QJSJSVarKind.Prop)) {
+                    qjsLeft.jsvar.inited = true;
+                }
+
+                qjsLeft.jsvar!.needsync = true;
+
+                switch (qjsRight.type) {
+                    case QJSCType.JSValue:
+                        writeQJSBase(generateQJSSetValue(qjsLeft, qjsRight));
+                        writeQJSTrailingSemicolon();
+                        writeQJSLine(2);
+                        break;
+                    case QJSCType.IntLiteral:
+                    case QJSCType.FloatLiteral:
+                    case QJSCType.Int:
+                    case QJSCType.Double:
+                        if (qjsLeft.type === qjsRight.type) {
+                            qjsLeft.value = qjsRight.value;
+                            qjsLeft.jstype = qjsRight.jstype;
+                            if (qjsLeft.jsvar) {
+                                qjsLeft.jsvar.value = qjsLeft.value;
+                                qjsLeft.jsvar.type = qjsRight.jstype;
+                                qjsLeft.jsvar.needsync = true;
+                            }
+                            writeQJSKeyword(qjsLeft.name);
+                            writeQJSSpace();
+                            writeQJSPunctuation("=");
+                            writeQJSSpace();
+                            writeQJSKeyword(qjsRight.name);
+                            writeQJSTrailingSemicolon();
+                            writeQJSLine(2);
+                            break;
+                        }
+
+                        if (qjsLeft.type === QJSCType.Int || qjsLeft.type === QJSCType.Double) {
+                            const type = qjsLeft.type === QJSCType.Int ? QJSCType.Double : QJSCType.Int;
+                            const tempVar = prepareQJSTempVar(type, qjsRight.jstype);
+                            tempVar.value = qjsRight.value;
+                            writeQJSKeyword(qjsTypeInfo[tempVar.type].type);
+                            writeQJSSpace();
+                            writeQJSKeyword(tempVar.name);
+                            writeQJSSpace();
+                            writeQJSPunctuation("=");
+                            writeQJSSpace();
+                            writeQJSKeyword(qjsRight.name);
+                            writeQJSTrailingSemicolon();
+                            writeQJSLine();
+
+                            if (qjsLeft.jsvar) {
+                                qjsLeft.jsvar.cvar = tempVar;
+                                qjsLeft.jsvar.type = tempVar.jstype;
+                                tempVar.jsvar = qjsLeft.jsvar;
+                                qjsLeft.jsvar = undefined;
+                                tempVar.jsvar.value = tempVar.value;
+                            }
+                        }
+                        else if (qjsLeft.type === QJSCType.JSValue) {
+                            qjsLeft.value = qjsRight.value;
+                            qjsLeft.jstype = qjsRight.jstype;
+                            if (qjsLeft.jsvar) {
+                                qjsLeft.jsvar.value = qjsLeft.value;
+                                qjsLeft.jsvar.type = qjsLeft.jstype;
+                                qjsLeft.jsvar.needsync = true;
+                            }
+
+                            writeQJSBase(generateQJSSetTempValue(qjsLeft, qjsRight));
+                            writeQJSTrailingSemicolon();
+                            writeQJSLine(2);
+                        }
+                        break;
+                    default:
+                        Debug.fail("qjs emitter: unsupportd type in emitQJSBinaryExpressionEqualsTo");
+                        break;
+                }
+            }
+
+        }
+
+        function emitQJSBoxVal(val: QJSVar): QJSVar {
+            if (val.type === QJSCType.JSValue) {
+                return val;
+            }
+
+            const tempVar = prepareQJSTempVar(QJSCType.JSValue, val.jstype);
+            popQJSValueStack();
+            if (val.type === QJSCType.Int ||
+                val.type === QJSCType.Double) {
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                writeQJSKeyword(tempVar.name);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+                writeQJSBase(generateQJSMKVal(val));
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+
+            return tempVar;
+        }
+
+
+        function emitQJSUnboxVal(val: QJSVar | undefined, ret: QJSVar) {
+            if (!val || ret.type === QJSCType.JSValue) {
+                return;
+            }
+
+            let unboxCode = "";
+            if (ret.type === QJSCType.Int) {
+                unboxCode = generateQJSJSValueGetInt(val)
+            }
+            else if (ret.type === QJSCType.Double) {
+                unboxCode = generateQJSJSValueGetFloat64(val);
+            }
+
+            writeQJSKeyword(ret.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(unboxCode);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSGetElement(array: QJSVar, index: QJSVar, val: QJSVar) {
+            let tempVar: QJSVar | undefined;
+            if (val.type === QJSCType.JSValue) {
+                writeQJSKeyword(val.name);
+            }
+            else {
+                tempVar = prepareQJSTempVar(QJSCType.JSValue, val.jstype);
+                popQJSValueStack();
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                writeQJSBase(tempVar.name);
+            }
+
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            if (index.jstype === QJSJSType.NumLiteral) {
+                if (index.type === QJSCType.Int) {
+                    writeQJSBase(generateQJSGetElementValue(array, index));
+                }
+                else {
+                    writeQJSBase(generateQJSGetPropertyValue(array, index));
+                }
+            }
+            else if (index.jstype === QJSJSType.Int32) {
+                //let indexCode = index.name;
+                //if (index.type === QJSCType.JSValue) {
+                //    indexCode = generateQJSJSValueGetInt(index);
+                //}
+                writeQJSBase(generateQJSGetElementValue(array, index));
+            }
+            else if (index.jstype === QJSJSType.Float64) {
+                writeQJSBase(generateQJSGetPropertyValue(array, index));
+            }
+            else if (index.jstype === QJSJSType.String) {
+                writeQJSBase(generateQJSGetPropertyValue(array, index));
+            }
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            emitQJSUnboxVal(tempVar, val);
+
+        }
+
+        function emitQJSGetProperty(qjsVar: QJSVar): QJSVar {
+            const [obj, name] = qjsVar.jsvar!.name.split("|");
+            const atom = qjsAtomMap.get(name)!;
+            let tempVar: QJSVar | undefined;
+
+            if (qjsVar.type === QJSCType.JSValue) {
+                writeQJSKeyword(qjsVar.name);
+            }
+            else {
+                tempVar = prepareQJSTempVar(QJSCType.JSValue, qjsVar.jstype);
+                popQJSValueStack();
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                writeQJSBase(tempVar.name);
+            }
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSGetProperty(obj, atom.name));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            emitQJSUnboxVal(tempVar, qjsVar);
+
+            qjsVar.jsvar!.inited = true;
+            qjsVar.value = undefined;
+
+            return qjsVar;
+        }
+
+        function emitQJSSetProperty(obj: QJSVar | string, prop: QJSVar, val: QJSVar) {
+            if (val.type === QJSCType.JSValue) {
+                writeQJSBase(generateQJSSetProperty(obj, prop.name, val));
+            }
+            else {
+                writeQJSBase(generateQJSSetProperty(obj, prop.name, generateQJSMKVal(val)));
+            }
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            if (prop.jsvar) {
+                prop.jsvar.cvar = val;
+                prop.jsvar.type = val.jstype;
+                prop.jsvar.needsync = false;
+                val.jsvar = prop.jsvar;
+                prop.jsvar = undefined;
+            }
+        }
+/*
+        function emitQJSGetGlobalVar(qjsVar: QJSVar): QJSVar {
+            prepareQJSTempVar(QJSCType.JSValue, qjsVar.jsvar!.type);
+            const leftVar = popQJSValueStack();
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(leftVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSGetGlobalVar(qjsVar));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            if (qjsVar.jsvar) {
+                qjsUpdateVarMap(qjsVar.jsvar.name, leftVar);
+                qjsVar.jsvar = undefined;
+            }
+            qjsVar.needfree = true;
+            return leftVar;
+        }
+*/
+        function emitQJSSetGlobalVar(atom: QJSVar, val: QJSVar, flags = "2") {
+            if (val.type === QJSCType.JSValue) {
+                writeQJSBase(generateQJSSetGlobalVar(atom, val, flags));
+            }
+            else {
+                writeQJSBase(generateQJSSetGlobalVar(atom, generateQJSMKVal(val), flags));
+            }
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            Debug.assert(val.jsvar && val.jsvar.cvar === val);
+
+            if (val.jsvar) {
+                val.jsvar.needsync = false;
+            }
+
+            val.needfree = false;
+        }
+
+        function emitQJSTryConstFolding(node: BinaryExpression, qjsLeft: QJSVar, qjsRight: QJSVar): QJSVar | undefined {
+            if (!qjsConfig.enableConstantFolding) {
+                return undefined;
+            }
+
+            function calculate(opnd1: number, opnd2: number, op: BinaryOperatorToken): number {
+                let ret: number;
+                switch (op.kind) {
+                    case SyntaxKind.PlusToken:
+                        ret = opnd1 + opnd2;
+                        break;
+                    case SyntaxKind.MinusToken:
+                        ret = opnd1 - opnd2;
+                        break;
+                    case SyntaxKind.AsteriskToken:
+                        ret = opnd1 * opnd2;
+                        break;
+                    case SyntaxKind.SlashToken:
+                        ret = opnd1 / opnd2;
+                        break;
+                    default:
+                        Debug.fail("qjs emitter: unreachable");
+                        break;
+                }
+
+                return ret;
+            }
+
+            let retVal: QJSVar | undefined;
+            if (((qjsLeft.jstype === QJSJSType.NumLiteral ||
+                qjsLeft.jsvar && qjsLeft.jsvar.type === QJSJSType.NumLiteral) && (
+                qjsRight.jstype === QJSJSType.NumLiteral ||
+                qjsRight.jsvar && qjsRight.jsvar.type === QJSJSType.NumLiteral))) {
+                    let constRet: number;
+                    if (qjsLeft.value) {
+                        constRet = +qjsLeft.value;
+                    }
+                    else {
+                        constRet = +qjsLeft.jsvar!.value!;
+                    }
+
+                    if (qjsRight.value) {
+                        constRet = calculate(constRet, +qjsRight.value, node.operatorToken);
+                    }
+                    else {
+                        constRet = calculate(constRet, +qjsRight.jsvar!.value!, node.operatorToken);
+                    }
+
+                    retVal = prepareQJSTempVar(Number.isInteger(constRet) ? QJSCType.Int : QJSCType.Double,
+                                            QJSJSType.NumLiteral);
+
+                    retVal.value = constRet.toString();
+                    retVal.needfree = false;
+            }
+            else {
+                if (node.operatorToken.kind !== SyntaxKind.PlusToken) {
+                    return undefined;
+                }
+
+                if ((qjsLeft.jstype === QJSJSType.StringLiteral ||
+                    qjsLeft.jsvar && qjsLeft.jsvar.type === QJSJSType.StringLiteral) && (
+                    qjsRight.jstype === QJSJSType.StringLiteral ||
+                    qjsRight.jsvar && qjsRight.jsvar.type === QJSJSType.StringLiteral)) {
+                        let constRet = "";
+                        if (qjsLeft.value) {
+                            constRet = qjsLeft.value;
+                        }
+                        else {
+                            constRet = qjsLeft.jsvar!.value!;
+                        }
+
+                        if (qjsRight.value) {
+                            constRet += qjsRight.value;
+                        }
+                        else {
+                            constRet += qjsRight.jsvar!.value!;
+                        }
+
+                        retVal = prepareQJSTempVar(QJSCType.JSValue, QJSJSType.StringLiteral);
+                        retVal.value = constRet;
+                        retVal.needfree = true;
+                }
+            }
+
+            if (retVal) {
+                writeQJSKeyword(qjsTypeInfo[retVal.type].type);
+                writeQJSSpace();
+                writeQJSKeyword(retVal.name);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+                if (retVal.jstype === QJSJSType.NumLiteral) {
+                    writeQJSBase(retVal.value!);
+                }
+                else if (retVal.jstype === QJSJSType.StringLiteral) {
+                    writeQJSBase(generateQJSNewString("\"" + retVal.value + "\""));
+                }
+
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+
+                return retVal;
+            }
+
+            return undefined;
+        }
+
+        function handleQJSIntFunc(qjsLeft: QJSVar, qjsRight: QJSVar, funcGen: (func: string, left: string, right: string) => string,
+            funcIntInt: string, funcIntNum: string): {emitFunc: string, jsType: QJSJSType, needfree: boolean} {
+            let emitFunc: string;
+            let jsType: QJSJSType;
+            let needfree = false;
+            switch (qjsRight.type) {
+                case QJSCType.Int:
+                    emitFunc = funcGen(funcIntInt, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Int32;
+                    needfree = false;
+                    break;
+                case QJSCType.Double:
+                    emitFunc = funcGen(funcIntNum, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Float64;
+                    needfree = false;
+                    break;
+                case QJSCType.JSValue:
+                    emitFunc = funcGen(funcIntNum, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Float64;
+                    needfree = false;
+                    break;
+                default:
+                    Debug.fail("qjs emitter: unsupported type now");
+                    break;
+            }
+
+            return {emitFunc, jsType, needfree};
+        }
+
+        function handleQJSDoubleFunc(qjsLeft: QJSVar, qjsRight: QJSVar, funcGen: (func: string, left: string, right: string) => string,
+            funcNumInt: string, funcNumNum: string): {emitFunc: string, jsType: QJSJSType, needfree: boolean}  {
+            let emitFunc: string;
+            let jsType: QJSJSType;
+            let needfree = false;
+            switch (qjsRight.type) {
+                case QJSCType.Int:
+                    emitFunc = funcGen(funcNumInt, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Float64;
+                    needfree = false;
+                    break;
+                case QJSCType.Double:
+                    emitFunc = funcGen(funcNumNum, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Float64;
+                    needfree = false;
+                    break;
+                case QJSCType.JSValue:
+                    emitFunc = funcGen(funcNumNum, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Float64;
+                    needfree = false;
+                    break;
+                default:
+                    Debug.fail("qjs emitter: unsupported type now");
+                    break;
+            }
+            return {emitFunc, jsType, needfree};
+        }
+
+        function handleQJS2JSValueFunc(qjsLeft: QJSVar, qjsRight: QJSVar, funcGen: (func: string, left: string, right: string) => string,
+            funcNumNum: string): {emitFunc: string, jsType: QJSJSType, needfree: boolean} {
+            let emitFunc: string;
+            let jsType: QJSJSType;
+            let needfree = false;
+            const isLeftNum = (qjsLeft.jstype === QJSJSType.Int32 ||
+                qjsLeft.jstype === QJSJSType.Float64 ||
+                qjsLeft.jstype === QJSJSType.NumLiteral);
+            const isRightNum = (qjsRight.jstype === QJSJSType.Int32 ||
+                qjsRight.jstype === QJSJSType.Float64 ||
+                qjsRight.jstype === QJSJSType.NumLiteral);
+            const isLeftStr = (qjsLeft.jstype === QJSJSType.String ||
+                qjsLeft.jstype === QJSJSType.StringLiteral);
+            const isRightStr = (qjsRight.jstype === QJSJSType.String ||
+                qjsRight.jstype === QJSJSType.StringLiteral);
+
+            Debug.assert(isLeftNum || isLeftStr, "qjs emitter: only num and str support add.");
+            Debug.assert(isRightNum || isRightStr, "qjs emitter: only num and str support add.");
+
+            if (isLeftNum) {
+                if (isRightNum) {
+                    emitFunc = funcGen(funcNumNum, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Float64;
+                    needfree = false;
+                }
+                else {
+                    Debug.fail("qjs emitter: unsupported operation.");
+                }
+            }
+            else if (isLeftStr) {
+                if (isRightStr) {
+                    emitFunc = generateQJSConcatString(qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.String;
+                    needfree = true;
+                }
+                else {
+                    Debug.fail("qjs emitter: unsupported operation right now.");
+                }
+            }
+            else {
+                Debug.fail("qjs emitter: unsupported operation.");
+            }
+
+            return {emitFunc, jsType, needfree};
+        }
+
+        function handleQJSJSValueFunc(qjsLeft: QJSVar, qjsRight: QJSVar, funcGen: (func: string, left: string, right: string) => string,
+            funcNumInt: string, funcNumNum: string): {emitFunc: string, jsType: QJSJSType, needfree: boolean} {
+            let emitFunc: string;
+            let jsType: QJSJSType;
+            let needfree = false;
+            switch (qjsRight.type) {
+                case QJSCType.Int:
+                    emitFunc = funcGen(funcNumInt, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Float64;
+                    needfree = false;
+                    break;
+                case QJSCType.Double:
+                    emitFunc = funcGen(funcNumNum, qjsLeft.name, qjsRight.name);
+                    jsType = QJSJSType.Float64;
+                    needfree = false;
+                    break;
+                case QJSCType.JSValue:
+                    ({emitFunc, jsType, needfree} = handleQJS2JSValueFunc(qjsLeft, qjsRight, funcGen, funcNumNum));
+                    break;
+                default:
+                    Debug.fail("qjs emitter: unsupported type now");
+                    break;
+            }
+
+            return {emitFunc, jsType, needfree};
+        }
+
+        function generateQJSAddNumFunc(func: string, left: string, right: string): string {
+            return func + "(ctx, " + left + ", " + right + ")";
+        }
+
+        function emitQJSBinaryExpressionPlus(node: BinaryExpression) {
+            const qjsRight = popQJSValueStack();
+            const qjsLeft = popQJSValueStack();
+
+            let jsType = QJSJSType.Unknown;
+            let emitFunc = "";
+            let needfree = true;
+
+            if (qjsLeft.jsvar &&
+                !qjsLeft.jsvar.inited) {
+                if (qjsLeft.jsvar.kind === QJSJSVarKind.GlobalVar) {
+                    emitQJSInitGlobalVar(qjsLeft);
+                }
+                else if (qjsLeft.jsvar.kind === QJSJSVarKind.Prop) {
+                    emitQJSGetProperty(qjsLeft);
+                }
+            }
+
+            if (qjsRight.jsvar &&
+                !qjsRight.jsvar.inited) {
+                if (qjsRight.jsvar.kind === QJSJSVarKind.GlobalVar) {
+                    emitQJSInitGlobalVar(qjsRight);
+                }
+                else if (qjsRight.jsvar.kind === QJSJSVarKind.Prop) {
+                    emitQJSGetProperty(qjsRight);
+                }
+            }
+
+            if (emitQJSTryConstFolding(node, qjsLeft, qjsRight)) {
+                return;
+            }
+
+            switch (qjsLeft.type) {
+                case QJSCType.Int:
+                    ({emitFunc, jsType, needfree} = handleQJSIntFunc(qjsLeft, qjsRight, generateQJSAddNumFunc, QJSFunction.JS_AddIntInt, QJSFunction.JS_AddIntNumber));
+                    break;
+                case QJSCType.Double:
+                    ({emitFunc, jsType, needfree} = handleQJSDoubleFunc(qjsLeft, qjsRight, generateQJSAddNumFunc, QJSFunction.JS_AddNumberInt, QJSFunction.JS_AddNumberNumber));
+                    break;
+                case QJSCType.JSValue:
+                    ({emitFunc, jsType, needfree} = handleQJSJSValueFunc(qjsLeft, qjsRight, generateQJSAddNumFunc, QJSFunction.JS_AddNumberInt, QJSFunction.JS_AddNumberNumber));
+                    break;
+                default:
+                    break;
+            }
+
+            const retVal = prepareQJSTempVar(QJSCType.JSValue, jsType);
+            retVal.needfree = needfree;
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(retVal.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(emitFunc);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+        }
+
+        function emitQJSBinaryExpressionPlusEqualsTo(node: BinaryExpression) {
+            let qjsRight = popQJSValueStack();
+            let qjsLeft: QJSVar;
+            let jsType = QJSJSType.Unknown;
+            let emitFunc = "";
+            let needfree = true;
+
+            if (qjsRight.jsvar && !qjsRight.jsvar.inited) {
+                if (qjsRight.jsvar.kind === QJSJSVarKind.GlobalVar) {
+                    emitQJSInitGlobalVar(qjsRight);
+                }
+                else if (qjsRight.jsvar.kind === QJSJSVarKind.Prop) {
+                    emitQJSGetProperty(qjsRight);
+                }
+            }
+
+            // get left value
+            if (node.left.kind === SyntaxKind.ElementAccessExpression) {
+                const index = popQJSValueStack();
+                const array = popQJSValueStack();
+
+                emitQJSElementAccessInternal(node.left as ElementAccessExpression, array, index);
+                qjsLeft = popQJSValueStack();
+                pushQJSValueStack(array);
+                pushQJSValueStack(index);
+            }
+            else {
+                qjsLeft = popQJSValueStack();
+            }
+
+            let retVal = emitQJSTryConstFolding(node, qjsLeft, qjsRight);
+            if (!retVal) {
+                switch (qjsLeft.type) {
+                    case QJSCType.Int:
+                        ({emitFunc, jsType, needfree} = handleQJSIntFunc(qjsLeft, qjsRight, generateQJSAddNumFunc, QJSFunction.JS_AddIntInt, QJSFunction.JS_AddIntNumber));
+                        break;
+                    case QJSCType.Double:
+                        ({emitFunc, jsType, needfree} = handleQJSDoubleFunc(qjsLeft, qjsRight, generateQJSAddNumFunc, QJSFunction.JS_AddNumberInt, QJSFunction.JS_AddNumberNumber));
+                        break;
+                    case QJSCType.JSValue:
+                        ({emitFunc, jsType, needfree} = handleQJSJSValueFunc(qjsLeft, qjsRight, generateQJSAddNumFunc, QJSFunction.JS_AddNumberInt, QJSFunction.JS_AddNumberNumber));
+                        break;
+                    default:
+                        break;
+                }
+
+                retVal = prepareQJSTempVar(QJSCType.JSValue, jsType);
+                retVal.needfree = needfree;
+
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                writeQJSKeyword(retVal.name);
+                writeQJSSpace();
+                writeQJSOperator("=");
+                writeQJSSpace();
+                writeQJSBase(emitFunc);
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+
+            // set left value
+            if (node.left.kind === SyntaxKind.ElementAccessExpression) {
+                retVal = popQJSValueStack();
+                const index = popQJSValueStack();
+                const array = popQJSValueStack();
+                //const tempVar = emitQJSBoxVal(retVal);
+
+                if ((index.type === QJSCType.IntLiteral ||
+                    index.type === QJSCType.Int) &&
+                    index.value) {
+                    writeQJSBase(generateQJSSetPropertyInt(array, index, retVal));
+                    retVal.needfree = false;
+                }
+                else {
+                    writeQJSBase(generateQJSSetPropertyInt64(array, index, retVal));
+                    retVal.needfree = false;
+                }
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+            else {
+                qjsRight = popQJSValueStack();
+
+                qjsUpdateFrame(qjsLeft.jsvar!);
+
+                if (qjsLeft.jsvar && !qjsLeft.jsvar.inited &&
+                    (qjsLeft.jsvar.kind === QJSJSVarKind.GlobalVar ||
+                    qjsLeft.jsvar.kind === QJSJSVarKind.Prop)) {
+                    qjsLeft.jsvar.inited = true;
+                }
+
+                qjsLeft.jsvar!.needsync = true;
+
+                switch (qjsRight.type) {
+                    case QJSCType.JSValue:
+                        writeQJSBase(generateQJSSetValue(qjsLeft, qjsRight));
+                        writeQJSTrailingSemicolon();
+                        writeQJSLine(2);
+                        break;
+                    case QJSCType.IntLiteral:
+                    case QJSCType.FloatLiteral:
+                    case QJSCType.Int:
+                    case QJSCType.Double:
+                        if (qjsLeft.type === qjsRight.type) {
+                            qjsLeft.value = qjsRight.value;
+                            qjsLeft.jstype = qjsRight.jstype;
+                            if (qjsLeft.jsvar) {
+                                qjsLeft.jsvar.value = qjsLeft.value;
+                                qjsLeft.jsvar.type = qjsRight.jstype;
+                                qjsLeft.jsvar.needsync = true;
+                            }
+                            writeQJSKeyword(qjsLeft.name);
+                            writeQJSSpace();
+                            writeQJSPunctuation("=");
+                            writeQJSSpace();
+                            writeQJSKeyword(qjsRight.name);
+                            writeQJSTrailingSemicolon();
+                            writeQJSLine(2);
+                            break;
+                        }
+
+                        if (qjsLeft.type === QJSCType.Int || qjsLeft.type === QJSCType.Double) {
+                            const type = qjsLeft.type === QJSCType.Int ? QJSCType.Double : QJSCType.Int;
+                            const tempVar = prepareQJSTempVar(type, qjsRight.jstype);
+                            tempVar.value = qjsRight.value;
+                            writeQJSKeyword(qjsTypeInfo[tempVar.type].type);
+                            writeQJSSpace();
+                            writeQJSKeyword(tempVar.name);
+                            writeQJSSpace();
+                            writeQJSPunctuation("=");
+                            writeQJSSpace();
+                            writeQJSKeyword(qjsRight.name);
+                            writeQJSTrailingSemicolon();
+                            writeQJSLine();
+
+                            if (qjsLeft.jsvar) {
+                                qjsLeft.jsvar.cvar = tempVar;
+                                qjsLeft.jsvar.type = tempVar.jstype;
+                                tempVar.jsvar = qjsLeft.jsvar;
+                                qjsLeft.jsvar = undefined;
+                                tempVar.jsvar.value = tempVar.value;
+                            }
+                        }
+                        else if (qjsLeft.type === QJSCType.JSValue) {
+                            qjsLeft.value = qjsRight.value;
+                            qjsLeft.jstype = qjsRight.jstype;
+                            if (qjsLeft.jsvar) {
+                                qjsLeft.jsvar.value = qjsLeft.value;
+                                qjsLeft.jsvar.type = qjsLeft.jstype;
+                                qjsLeft.jsvar.needsync = true;
+                            }
+
+                            writeQJSBase(generateQJSSetTempValue(qjsLeft, qjsRight));
+                            writeQJSTrailingSemicolon();
+                            writeQJSLine(2);
+                        }
+                        break;
+                    default:
+                        Debug.fail("qjs emitter: unsupportd type in emitQJSBinaryExpressionEqualsTo");
+                        break;
+                }
+            }
+        }
+
+        function emitQJSBinaryExpressionMinus(node: BinaryExpression) {
+            const qjsRight = popQJSValueStack();
+            const qjsLeft = popQJSValueStack();
+
+            let jsType = QJSJSType.Unknown;
+            let emitFunc = "";
+            let needfree = true;
+
+            function generateQJSSubNumFunc(func: string, left: string, right: string) {
+                return func + "(ctx, " + left + ", " + right + ")";
+            }
+
+            if (qjsLeft.jsvar &&
+                qjsLeft.jsvar.kind === QJSJSVarKind.GlobalVar &&
+                !qjsLeft.jsvar.inited) {
+                emitQJSInitGlobalVar(qjsLeft);
+            }
+
+            if (qjsRight.jsvar &&
+                qjsRight.jsvar.kind === QJSJSVarKind.GlobalVar &&
+                !qjsRight.jsvar.inited) {
+                emitQJSInitGlobalVar(qjsRight);
+            }
+
+            if (emitQJSTryConstFolding(node, qjsLeft, qjsRight)) {
+                return;
+            }
+
+            switch (qjsLeft.type) {
+                case QJSCType.Int:
+                    ({emitFunc, jsType, needfree} = handleQJSIntFunc(qjsLeft, qjsRight, generateQJSSubNumFunc, QJSFunction.JS_SubIntInt, QJSFunction.JS_SubIntNumber));
+                    break;
+                case QJSCType.Double:
+                    ({emitFunc, jsType, needfree} = handleQJSDoubleFunc(qjsLeft, qjsRight, generateQJSSubNumFunc, QJSFunction.JS_SubNumberInt, QJSFunction.JS_SubNumberNumber));
+                    break;
+                case QJSCType.JSValue:
+                    ({emitFunc, jsType, needfree} = handleQJSJSValueFunc(qjsLeft, qjsRight, generateQJSSubNumFunc, QJSFunction.JS_SubNumberInt, QJSFunction.JS_SubNumberNumber));
+                    break;
+                default:
+                    break;
+            }
+
+            const retVal = prepareQJSTempVar(QJSCType.JSValue, jsType);
+            retVal.needfree = needfree;
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(retVal.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(emitFunc);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSBinaryExpressionAsterisk(node: BinaryExpression) {
+            const qjsRight = popQJSValueStack();
+            const qjsLeft = popQJSValueStack();
+
+            let jsType = QJSJSType.Unknown;
+            let emitFunc = "";
+            let needfree = true;
+
+            function generateQJSMulNumFunc(func: string, left: string, right: string) {
+                return func + "(ctx, " + left + ", " + right + ")";
+            }
+
+            if (qjsLeft.jsvar &&
+                qjsLeft.jsvar.kind === QJSJSVarKind.GlobalVar &&
+                !qjsLeft.jsvar.inited) {
+                emitQJSInitGlobalVar(qjsLeft);
+            }
+
+            if (qjsRight.jsvar &&
+                qjsRight.jsvar.kind === QJSJSVarKind.GlobalVar &&
+                !qjsRight.jsvar.inited) {
+                emitQJSInitGlobalVar(qjsRight);
+            }
+
+            if (emitQJSTryConstFolding(node, qjsLeft, qjsRight)) {
+                return;
+            }
+
+            switch (qjsLeft.type) {
+                case QJSCType.Int:
+                    ({emitFunc, jsType, needfree} = handleQJSIntFunc(qjsLeft, qjsRight, generateQJSMulNumFunc, QJSFunction.JS_MulIntInt, QJSFunction.JS_MulIntNumber));
+                    break;
+                case QJSCType.Double:
+                    ({emitFunc, jsType, needfree} = handleQJSDoubleFunc(qjsLeft, qjsRight, generateQJSMulNumFunc, QJSFunction.JS_MulNumberInt, QJSFunction.JS_MulNumberNumber));
+                    break;
+                case QJSCType.JSValue:
+                    ({emitFunc, jsType, needfree} = handleQJSJSValueFunc(qjsLeft, qjsRight, generateQJSMulNumFunc, QJSFunction.JS_MulNumberInt, QJSFunction.JS_MulNumberNumber));
+                    break;
+                default:
+                    break;
+            }
+
+            const retVal = prepareQJSTempVar(QJSCType.JSValue, jsType);
+            retVal.needfree = needfree;
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(retVal.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(emitFunc);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+        }
+
+        function emitQJSBinaryExpressionSlash(node: BinaryExpression) {
+            const qjsRight = popQJSValueStack();
+            const qjsLeft = popQJSValueStack();
+
+            let jsType = QJSJSType.Unknown;
+            let emitFunc = "";
+            let needfree = true;
+
+            function generateQJSDivNumFunc(func: string, left: string, right: string) {
+                return func + "(ctx, " + left + ", " + right + ")";
+            }
+
+            if (qjsLeft.jsvar &&
+                qjsLeft.jsvar.kind === QJSJSVarKind.GlobalVar &&
+                !qjsLeft.jsvar.inited) {
+                emitQJSInitGlobalVar(qjsLeft);
+            }
+
+            if (qjsRight.jsvar &&
+                qjsRight.jsvar.kind === QJSJSVarKind.GlobalVar &&
+                !qjsRight.jsvar.inited) {
+                emitQJSInitGlobalVar(qjsRight);
+            }
+
+            if (emitQJSTryConstFolding(node, qjsLeft, qjsRight)) {
+                return;
+            }
+
+            switch (qjsLeft.type) {
+                case QJSCType.Int:
+                    ({emitFunc, jsType, needfree} = handleQJSIntFunc(qjsLeft, qjsRight, generateQJSDivNumFunc, QJSFunction.JS_DivIntInt, QJSFunction.JS_DivIntNumber));
+                    break;
+                case QJSCType.Double:
+                    ({emitFunc, jsType, needfree} = handleQJSDoubleFunc(qjsLeft, qjsRight, generateQJSDivNumFunc, QJSFunction.JS_DivNumberInt, QJSFunction.JS_DivNumberNumber));
+                    break;
+                case QJSCType.JSValue:
+                    ({emitFunc, jsType, needfree} = handleQJSJSValueFunc(qjsLeft, qjsRight, generateQJSDivNumFunc, QJSFunction.JS_DivNumberInt, QJSFunction.JS_DivNumberNumber));
+                    break;
+                default:
+                    break;
+            }
+
+            const retVal = prepareQJSTempVar(QJSCType.JSValue, jsType);
+            retVal.needfree = needfree;
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(retVal.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(emitFunc);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSBinaryExpression(node: BinaryExpression) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            if (node.operatorToken) {
+                switch (node.operatorToken.kind) {
+                    case SyntaxKind.LessThanEqualsToken:
+                        case SyntaxKind.LessThanToken:
+                        emitQJSBinaryExpressionCompNum(node.operatorToken.kind);
+                        break;
+                    case SyntaxKind.EqualsEqualsEqualsToken:
+                        emitQJSBinaryExpressionStrictEquals();
+                        break;
+                    case SyntaxKind.EqualsToken:
+                        emitQJSBinaryExpressionEqualsTo(node);
+                        break;
+                    case SyntaxKind.PlusToken:
+                        emitQJSBinaryExpressionPlus(node);
+                        break;
+                    case SyntaxKind.PlusEqualsToken:
+                        emitQJSBinaryExpressionPlusEqualsTo(node);
+                        break;
+                    case SyntaxKind.MinusToken:
+                        emitQJSBinaryExpressionMinus(node);
+                        break;
+                    case SyntaxKind.AsteriskToken:
+                        emitQJSBinaryExpressionAsterisk(node);
+                        break;
+                    case SyntaxKind.SlashToken:
+                        emitQJSBinaryExpressionSlash(node);
+                        break;
+                    case SyntaxKind.AmpersandAmpersandToken:
+                        emitQJSBinaryExpressionLogic(node.operatorToken.kind);
+                        break;
+                    default:
+                        Debug.log(`QJS emitter: unsupported binary expression operator ${node.operatorToken.kind}.`);
+                        break;
+
+                }
+            }
         }
 
         function createEmitBinaryExpression() {
@@ -2705,7 +5585,18 @@ namespace ts {
             }
 
             function onLeft(next: Expression, _workArea: WorkArea, parent: BinaryExpression) {
-                return maybeEmitExpression(next, parent, "left");
+                if (isAssignmentExpression(parent, false)) {
+                    qjsEmitterState = QJSValueStackState.LValue;
+                }
+                else {
+                    qjsEmitterState = QJSValueStackState.RValue;
+                }
+                const expr = maybeEmitExpression(next, parent, "left");
+                qjsEmitterState = QJSValueStackState.None;
+                if (expr) {
+                    qjsEmitterState = QJSValueStackState.RValue;
+                }
+                return expr;
             }
 
             function onOperator(operatorToken: BinaryOperatorToken, _state: WorkArea, node: BinaryExpression) {
@@ -2720,7 +5611,13 @@ namespace ts {
             }
 
             function onRight(next: Expression, _workArea: WorkArea, parent: BinaryExpression) {
-                return maybeEmitExpression(next, parent, "right");
+                qjsEmitterState = QJSValueStackState.RValue;
+                const expr =  maybeEmitExpression(next, parent, "right");
+                qjsEmitterState = QJSValueStackState.None;
+                if (expr) {
+                    qjsEmitterState = QJSValueStackState.RValue;
+                }
+                return expr;
             }
 
             function onExit(node: BinaryExpression, state: WorkArea) {
@@ -2740,6 +5637,8 @@ namespace ts {
                     onAfterEmitNode?.(node);
                     state.stackIndex--;
                 }
+
+                emitQJSBinaryExpression(node);
             }
 
             function maybeEmitExpression(next: Expression, parent: BinaryExpression, side: "left" | "right") {
@@ -2853,10 +5752,25 @@ namespace ts {
         }
 
         function emitBlockStatements(node: BlockLike, forceSingleLine: boolean) {
+            if (!!printerOptions.emitQJSCode) {
+                emitQJSBlockBegin(node);
+                const originNode = getParseTreeNode(node);
+                emitQJSVarDefList(originNode);
+            }
+
             emitTokenWithComment(SyntaxKind.OpenBraceToken, node.pos, writePunctuation, /*contextNode*/ node);
             const format = forceSingleLine || getEmitFlags(node) & EmitFlags.SingleLine ? ListFormat.SingleLineBlockStatements : ListFormat.MultiLineBlockStatements;
             emitList(node, node.statements, format);
             emitTokenWithComment(SyntaxKind.CloseBraceToken, node.statements.end, writePunctuation, /*contextNode*/ node, /*indentLeading*/ !!(format & ListFormat.MultiLine));
+
+            if (!!printerOptions.emitQJSCode) {
+                emitQJSBlockEnd();
+                if (!(node.parent.kind === SyntaxKind.IfStatement &&
+                    (node.parent as IfStatement).thenStatement === node &&
+                    !!(node.parent as IfStatement).elseStatement)) {
+                        writeQJSLine(2);
+                }
+            }
         }
 
         function emitVariableStatement(node: VariableStatement) {
@@ -2876,6 +5790,13 @@ namespace ts {
             }
         }
 
+        function emitQJSExpressStatement() {
+            if (!!printerOptions.emitQJSCode) {
+                // sometimes a statement needs a result value
+                //qjsValueStack.pop();
+            }
+        }
+
         function emitExpressionStatement(node: ExpressionStatement) {
             emitExpression(node.expression, parenthesizer.parenthesizeExpressionOfExpressionStatement);
             // Emit semicolon in non json files
@@ -2883,25 +5804,163 @@ namespace ts {
             if (!isJsonSourceFile(currentSourceFile!) || nodeIsSynthesized(node.expression)) {
                 writeTrailingSemicolon();
             }
+
+            emitQJSExpressStatement();
+        }
+
+        function emitQJSIfStatement() {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const qjsVar = popQJSValueStack();
+
+            writeQJSKeyword("if");
+            writeQJSSpace();
+            writeQJSPunctuation("(");
+            writeQJSBase(qjsVar.name);
+            writeQJSPunctuation(")");
+            writeQJSSpace();
+        }
+
+        function mergeQJSPhiVars(vars: ESMap<string, QJSJSVar>) {
+            vars.forEach((value, _) => {
+                const outerJsVar = value.outer;
+                let needUpdate = false;
+                if (!outerJsVar) {
+                    return;
+                }
+
+                if (outerJsVar.cvar !== value.cvar) {
+                    return;
+                }
+
+                if (value.kind === QJSJSVarKind.GlobalVar) {
+                    outerJsVar.needsync ||= value.needsync;
+                }
+
+                if (outerJsVar.type === QJSJSType.NumLiteral &&
+                    value.type === QJSJSType.NumLiteral) {
+                    if (outerJsVar.value === value.value) {
+                        return;
+                    }
+
+                    if (Number.isInteger(+outerJsVar.value!) &&
+                        Number.isInteger(+value.value!)) {
+                            outerJsVar.type = QJSJSType.Int32;
+                    }
+                    else {
+                        outerJsVar.type = QJSJSType.Float64;
+                    }
+
+                    outerJsVar.cvar.jstype = outerJsVar.type;
+                    outerJsVar.value = undefined;
+                    outerJsVar.cvar.value = undefined;
+
+                    needUpdate = true;
+                }
+                else {
+                    if (outerJsVar.type === QJSJSType.Int32 &&
+                        value.type === QJSJSType.Int32) {
+                        outerJsVar.type = QJSJSType.Int32;
+                    }
+                    else {
+                        outerJsVar.type = QJSJSType.Float64;
+                    }
+
+                    outerJsVar.cvar.jstype = outerJsVar.type;
+                    outerJsVar.value = undefined;
+                    outerJsVar.cvar.value = undefined;
+
+                    needUpdate = true;
+                }
+
+                if (!needUpdate) {
+                    return;
+                }
+
+                qjsUpdateClosestPhiNode(outerJsVar);
+            });
+        }
+
+        function qjsPhiAfterIf(phiNode: QJSIfPhiNode) {
+
+            if (phiNode.thenVars.size > 0) {
+                mergeQJSPhiVars(phiNode.thenVars);
+            }
+
+            if (phiNode.elseVars.size > 0) {
+                mergeQJSPhiVars(phiNode.elseVars);
+            }
         }
 
         function emitIfStatement(node: IfStatement) {
             const openParenPos = emitTokenWithComment(SyntaxKind.IfKeyword, node.pos, writeKeyword, node);
             writeSpace();
             emitTokenWithComment(SyntaxKind.OpenParenToken, openParenPos, writePunctuation, node);
+            qjsEmitterState = QJSValueStackState.RValue;
             emitExpression(node.expression);
+            qjsEmitterState = QJSValueStackState.None;
+
+            let curFrame: QJSFrame;
+            const saveBlockType = qjsCurBlockType;
+            if (!!printerOptions.emitQJSCode) {
+                if (!qjsConfig.enableLazyWriteBack) {
+                    qjsWriteBackObjects();
+                }
+
+                emitQJSIfStatement();
+                curFrame = qjsGetCurFrame();
+                const ifphi: QJSIfPhiNode = {
+                    kind: QJSPhiKind.IfPhi,
+                    thenVars: new Map<string, QJSJSVar>(),
+                    elseVars: new Map<string, QJSJSVar>(),
+                    originVars: new Map<string, QJSJSVar>(),
+                };
+                curFrame.phinodes.push(ifphi);
+                qjsCurBlockType = QJSBlockType.IfThen;
+            }
+
             emitTokenWithComment(SyntaxKind.CloseParenToken, node.expression.end, writePunctuation, node);
             emitEmbeddedStatement(node, node.thenStatement);
+
             if (node.elseStatement) {
+                qjsCurBlockType = QJSBlockType.IfElse;
                 writeLineOrSpace(node, node.thenStatement, node.elseStatement);
                 emitTokenWithComment(SyntaxKind.ElseKeyword, node.thenStatement.end, writeKeyword, node);
+
+                if (!!printerOptions.emitQJSCode) {
+                    writeQJSSpace();
+                    writeQJSKeyword("else");
+                    writeQJSSpace();
+                }
+
                 if (node.elseStatement.kind === SyntaxKind.IfStatement) {
                     writeSpace();
+                    if (!!printerOptions.emitQJSCode) {
+                        writeQJSPunctuation("{");
+                        writeQJSLine();
+                        increaseQJSIndent();
+                    }
                     emit(node.elseStatement);
+
+                    if (!!printerOptions.emitQJSCode) {
+                        writeQJSLine();
+                        decreaseQJSIndent();
+                        writeQJSPunctuation("}");
+                    }
                 }
                 else {
                     emitEmbeddedStatement(node, node.elseStatement);
                 }
+            }
+
+            if (!!printerOptions.emitQJSCode) {
+                qjsCurBlockType = saveBlockType;
+                Debug.assert(curFrame!.phinodes.length > 0);
+                const phinode = curFrame!.phinodes.pop()!;
+                Debug.assert(phinode.kind === QJSPhiKind.IfPhi);
+                qjsPhiAfterIf(phinode as QJSIfPhiNode);
             }
         }
 
@@ -2932,20 +5991,281 @@ namespace ts {
             emitEmbeddedStatement(node, node.statement);
         }
 
+        function emitQJSForProlog(node: ForStatement) {
+            (node);
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const ret = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+            popQJSValueStack();
+            writeQJSKeyword(qjsTypeInfo[ret.type].type);
+            writeQJSSpace();
+            writeQJSKeyword(ret.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSKeyword(QJSReserved.True);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            writeQJSKeyword(QJSReserved.While);
+            writeQJSSpace();
+            writeQJSPunctuation("(");
+            writeQJSKeyword(ret.name);
+            writeQJSPunctuation(")");
+            writeQJSSpace();
+
+            writeTokenText(SyntaxKind.OpenBraceToken, writeQJSPunctuation);
+            writeQJSLine();
+            increaseQJSIndent();
+
+            const curFrame = qjsGetCurFrame();
+            const forloopphi: QJSLoopPhiNode = {
+                kind: QJSPhiKind.LoopPhi,
+                loopVars: new Map<string, QJSJSVar>(),
+            };
+            curFrame.phinodes.push(forloopphi);
+        }
+
+        function emitQJSForBreak() {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+            const match = popQJSValueStack();
+            writeQJSBase("if (!" + match.name + ") {");
+            writeQJSLine();
+            increaseQJSIndent();
+            writeQJSKeyword(QJSReserved.Break);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            decreaseQJSIndent();
+            writeQJSBase("}");
+            writeQJSLine();
+
+        }
+
+        function emitQJSForEpilog(node: ForStatement) {
+            (node);
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            decreaseQJSIndent();
+            writeTokenText(SyntaxKind.CloseBraceToken, writeQJSPunctuation);
+            writeQJSLine();
+        }
+
+        function emitQJSCBlockBegin() {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+            writeQJSPunctuation("{");
+            writeQJSLine();
+            increaseQJSIndent();
+        }
+
+        function emitQJSCBlockEnd() {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+            decreaseQJSIndent();
+            writeQJSPunctuation("}");
+            writeQJSLine();
+        }
+
         function emitForStatement(node: ForStatement) {
+            if (!!printerOptions.emitQJSCode) {
+                emitQJSCBlockBegin();
+                emitQJSForLocalVarDef(node);
+            }
+
             const openParenPos = emitTokenWithComment(SyntaxKind.ForKeyword, node.pos, writeKeyword, node);
             writeSpace();
             let pos = emitTokenWithComment(SyntaxKind.OpenParenToken, openParenPos, writePunctuation, /*contextNode*/ node);
             emitForBinding(node.initializer);
+
+            if (!!printerOptions.emitQJSCode) {
+                emitQJSForProlog(node);
+            }
+            const saveBlockType = qjsCurBlockType;
+            qjsCurBlockType = QJSBlockType.Loop;
+
             pos = emitTokenWithComment(SyntaxKind.SemicolonToken, node.initializer ? node.initializer.end : pos, writePunctuation, node);
             emitExpressionWithLeadingSpace(node.condition);
+
+            if (!!printerOptions.emitQJSCode) {
+                emitQJSForBreak();
+            }
+
+            const saveCEmitterState = printerOptions.emitQJSCode;
+            printerOptions.emitQJSCode = false;
             pos = emitTokenWithComment(SyntaxKind.SemicolonToken, node.condition ? node.condition.end : pos, writePunctuation, node);
             emitExpressionWithLeadingSpace(node.incrementor);
+            printerOptions.emitQJSCode = saveCEmitterState;
+
             emitTokenWithComment(SyntaxKind.CloseParenToken, node.incrementor ? node.incrementor.end : pos, writePunctuation, node);
             emitEmbeddedStatement(node, node.statement);
+
+            // inc needs to be put in the end of for loop in c code
+            if (!!printerOptions.emitQJSCode) {
+                const saveState = qjsEmitterState;
+                qjsEmitterState = QJSValueStackState.None;
+                pos = emitTokenWithComment(SyntaxKind.SemicolonToken, node.condition ? node.condition.end : pos, writePunctuation, node);
+                const saveJSEmitState = qjsPauseJSEmit;
+                qjsPauseJSEmit = true;
+                emitExpressionWithLeadingSpace(node.incrementor);
+                qjsPauseJSEmit = saveJSEmitState;
+                qjsEmitterState = saveState;
+            }
+
+            if (!!printerOptions.emitQJSCode) {
+                qjsCurBlockType = saveBlockType;
+
+                const curFrame = qjsGetCurFrame();
+                Debug.assert(curFrame.phinodes.length > 0);
+                const phinode = curFrame.phinodes.pop()!;
+                Debug.assert(phinode.kind === QJSPhiKind.LoopPhi);
+                qjsPhiAfterLoop(phinode as QJSLoopPhiNode);
+
+                emitQJSForEpilog(node);
+                emitQJSCBlockEnd();
+            }
+        }
+
+        function qjsPhiAfterLoop(phiNode: QJSLoopPhiNode) {
+            if (phiNode.loopVars.size > 0) {
+                mergeQJSPhiVars(phiNode.loopVars);
+            }
+        }
+
+        function emitQJSForInProlog(node: Expression) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const obj = popQJSValueStack();
+
+            const iter = prepareQJSTempVar(QJSCType.JSValue, QJSJSType.Object);
+            popQJSValueStack();
+            writeQJSKeyword(qjsTypeInfo[iter.type].type);
+            writeQJSSpace();
+            writeQJSKeyword(iter.name);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            writeQJSBase(generateQJSJSForInStart(obj, iter));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            const ret = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+            popQJSValueStack();
+            writeQJSKeyword(qjsTypeInfo[ret.type].type);
+            writeQJSSpace();
+            writeQJSKeyword(ret.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSKeyword(QJSReserved.False);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            writeQJSKeyword(QJSReserved.While);
+            writeQJSSpace();
+            writeQJSPunctuation("(");
+            writeQJSPunctuation("!");
+            writeQJSKeyword(ret.name);
+            writeQJSPunctuation(")");
+            writeQJSSpace();
+
+            //const saveBlockType = qjsCurBlockType;
+            //qjsCurBlockType = QJSBlockType.Loop;
+            //emitQJSBlockBegin(node);
+
+            writeTokenText(SyntaxKind.OpenBraceToken, writeQJSPunctuation);
+            writeQJSLine();
+            increaseQJSIndent();
+
+            /*
+            Debug.assert(!!node.parent.locals && node.parent.locals.size === 1);
+            let keyName = "";
+            node.parent.locals.forEach((_, key) => {
+                keyName = key.toString();
+            });
+            const qjsJSVarMap = qjsGetCurFrame().jsvarmap;
+            let keyJSVar = qjsJSVarMap.get(keyName);
+
+            if (!keyJSVar) {
+                keyJSVar = resolveQJSIdentifierInternal(keyName);
+                if (keyJSVar) {
+                    pushQJSValueStack(keyJSVar.cvar);
+                }
+            }
+            */
+            Debug.assert(!!node.parent.locals && node.parent.locals.size === 1);
+            let keyName = "";
+            node.parent.locals.forEach((_, key) => {
+                keyName = key.toString();
+            });
+            const qjsJSVarMap = qjsGetCurFrame().jsvarmap;
+            const keyJSVar = qjsJSVarMap.get(keyName)!;
+            pushQJSValueStack(keyJSVar.cvar);
+            const keyVar = popQJSValueStack();
+            writeQJSBase(generateQJSJSForInNext(iter, keyVar, ret));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            //qjsUpdateFrame(keyVar.jsvar!);
+            //keyVar.jsvar!.needsync = true;
+
+            writeQJSBase("if (" + ret.name + ") {");
+            writeQJSLine();
+            increaseQJSIndent();
+            writeQJSKeyword(QJSReserved.Break);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            decreaseQJSIndent();
+            writeQJSBase("}");
+            writeQJSLine();
+
+            //qjsCurBlockType = saveBlockType;
+        }
+
+        function emitQJSForInEpilog(node: Expression) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            //emitQJSBlockEnd();
+            Debug.assert(!!node.parent.locals && node.parent.locals.size === 1);
+            let keyName = "";
+            node.parent.locals.forEach((_, key) => {
+                keyName = key.toString();
+            });
+            const qjsJSVarMap = qjsGetCurFrame().jsvarmap;
+            const keyJSVar = qjsJSVarMap.get(keyName)!;
+
+            emitQJSFreeValue(keyJSVar.cvar);
+
+            decreaseQJSIndent();
+            writeTokenText(SyntaxKind.CloseBraceToken, writeQJSPunctuation);
+            writeQJSLine();
+
+            keyJSVar.cvar.needfree = false;
+        }
+
+        function emitQJSForLocalVarDef(node: IterationStatement) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+            const origin_node = getParseTreeNode(node);
+            emitQJSVarDefList(origin_node);
         }
 
         function emitForInStatement(node: ForInStatement) {
+            emitQJSForLocalVarDef(node);
             const openParenPos = emitTokenWithComment(SyntaxKind.ForKeyword, node.pos, writeKeyword, node);
             writeSpace();
             emitTokenWithComment(SyntaxKind.OpenParenToken, openParenPos, writePunctuation, node);
@@ -2954,8 +6274,11 @@ namespace ts {
             emitTokenWithComment(SyntaxKind.InKeyword, node.initializer.end, writeKeyword, node);
             writeSpace();
             emitExpression(node.expression);
+
+            emitQJSForInProlog(node.expression);
             emitTokenWithComment(SyntaxKind.CloseParenToken, node.expression.end, writePunctuation, node);
             emitEmbeddedStatement(node, node.statement);
+            emitQJSForInEpilog(node.expression);
         }
 
         function emitForOfStatement(node: ForOfStatement) {
@@ -3060,10 +6383,37 @@ namespace ts {
             return parenthesizeExpressionForNoAsi(parenthesizer.parenthesizeExpressionForDisallowedComma(node));
         }
 
+        function emitQJSReturnStatement() {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const qjsVar = popQJSValueStack();
+            qjsVar.needfree = false;
+
+            emitQJSFreeVars(true);
+
+            writeQJSKeyword(QJSReserved.Return);
+            writeQJSSpace();
+            if (qjsVar.type !== QJSCType.JSValue) {
+                writeQJSKeyword(generateQJSMKVal(qjsVar));
+            }
+            else {
+                writeQJSKeyword(qjsVar.name);
+            }
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            qjsGetCurFrame().needEmitReturn = false;
+        }
+
         function emitReturnStatement(node: ReturnStatement) {
+            qjsEmitterState = QJSValueStackState.RValue;
             emitTokenWithComment(SyntaxKind.ReturnKeyword, node.pos, writeKeyword, /*contextNode*/ node);
             emitExpressionWithLeadingSpace(node.expression && parenthesizeExpressionForNoAsi(node.expression), parenthesizeExpressionForNoAsi);
             writeTrailingSemicolon();
+
+            emitQJSReturnStatement();
         }
 
         function emitWithStatement(node: WithStatement) {
@@ -3092,14 +6442,68 @@ namespace ts {
             emit(node.statement);
         }
 
+        function isQJSInTryBlock(node: Node): boolean {
+            let cur = node;
+            while (cur) {
+                if (cur.kind === SyntaxKind.TryStatement) {
+                    return true;
+                }
+
+                if (cur.kind === SyntaxKind.FunctionDeclaration) {
+                    break;
+                }
+
+                cur = cur.parent;
+            }
+            return false;
+        }
+
+        function emitQJSThrowStatement(node: ThrowStatement) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            const exceptionObj = popQJSValueStack();
+
+            if (isQJSInTryBlock(node)) {
+                writeQJSKeyword(QJSReserved.Throw);
+                writeQJSPunctuation("(");
+                writeQJSBase(exceptionObj.name);
+                writeQJSPunctuation(")");
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+                exceptionObj.needfree = false;
+            }
+            else {
+                // get exception
+                // throw it by c/c++
+            }
+        }
+
         function emitThrowStatement(node: ThrowStatement) {
             emitTokenWithComment(SyntaxKind.ThrowKeyword, node.pos, writeKeyword, node);
+            qjsEmitterState = QJSValueStackState.RValue;
             emitExpressionWithLeadingSpace(parenthesizeExpressionForNoAsi(node.expression), parenthesizeExpressionForNoAsi);
+            emitQJSThrowStatement(node);
             writeTrailingSemicolon();
         }
 
+        function emitQJSTry() {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            if (qjsConfig.useCPlusPlus) {
+                writeQJSKeyword(QJSReserved.Try);
+            }
+
+            writeQJSSpace();
+
+            qjsCurBlockType = QJSBlockType.Try;
+        }
         function emitTryStatement(node: TryStatement) {
             emitTokenWithComment(SyntaxKind.TryKeyword, node.pos, writeKeyword, node);
+            emitQJSTry();
             writeSpace();
             emit(node.tryBlock);
             if (node.catchClause) {
@@ -3122,12 +6526,185 @@ namespace ts {
         //
         // Declarations
         //
+        function prepareQJSTempVar(ctype: QJSCType, jstype: QJSJSType): QJSVar {
+            const qjsVarName = generateQJSTempVarName(ctype);
+            const qjsVar = qjsNewVar(undefined, ctype, qjsVarName);
+
+            qjsVar.jstype = jstype;
+            if (jstype < QJSJSType.RefType) {
+                qjsVar.needfree = false;
+            }
+
+            pushQJSValueStack(qjsVar);
+            return qjsVar;
+        }
+
+        function pushQJSValueStack(qjsVar: QJSVar) {
+            qjsValueStack.push(qjsVar);
+        }
+
+        function popQJSValueStack(): QJSVar {
+            const qjsVar = qjsValueStack.pop()!;
+            Debug.assert(qjsVar, "qjs emitter: value stack is empty.");
+            return qjsVar;
+        }
+
+        function peekQJSValueStack(): QJSVar {
+            const qjsVar = qjsValueStack[qjsValueStack.length - 1];
+            return qjsVar;
+        }
+/*
+        function emitQJSSetTag(tagName: string, tag: string) {
+            writeQJSKeyword(tagName);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(tag);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSTagCast(qjsVar: QJSVar, ctype: QJSCType.Int | QJSCType.Double) {
+            if (ctype === QJSCType.Int) {
+                emitQJSSetTag(qjsVar.name, QJSReserved.JS_TAG_INT);
+            }
+            else {
+                emitQJSSetTag(qjsVar.name, QJSReserved.JS_TAG_FLOAT64);
+            }
+        }
+
+        function qjsRecordExpression(op: string, object: string, prop: string, val: QJSVar) {
+            qjsExprMap.set(op + object + prop, val);
+        }
+
+        function qjsFindCommonExpress(op: string, object: string, prop: string): QJSVar | undefined {
+            return qjsExprMap.get(op + object + prop);
+        }
+
+        function qjsUpdateVarMap(name: string, qjsVar: QJSVar, needsync = false) {
+            const qjsJSVarMap = qjsGetCurFrame().jsvarmap;
+            const jsVar = qjsJSVarMap.get(name)!;
+            Debug.assert(jsVar);
+            jsVar.cvar = qjsVar;
+            jsVar.needsync = needsync;
+            qjsVar.jsvar = jsVar;
+
+            //dont forget to update valuestack
+            //qjsValueStack.forEach((value, index, array) => {
+            //    if (value.jsvar && value.jsvar === jsVar) {
+            //        array[index] = qjsVar;
+            //    }
+            //});
+        }
+
+        function qjsUpdateVarMapByJSVar(jsVar: QJSJSVar, qjsVar: QJSVar, needsync = false) {
+            jsVar.cvar = qjsVar;
+            jsVar.needsync = needsync;
+            qjsVar.jsvar = jsVar;
+
+            //dont forget to update valuestack
+            qjsValueStack.forEach((value, index, array) => {
+                if (value.jsvar && value.jsvar === jsVar) {
+                    array[index] = qjsVar;
+                }
+            });
+        }
+*/
+        function emitQJSNumberTypeAssignmentCast(qjsVar: QJSVar, qjsVal: QJSVar) {
+            switch (qjsVar.type) {
+                case QJSCType.Int:
+                    break;
+                case QJSCType.Double:
+                    break;
+                case QJSCType.JSValue:
+                    writeQJSBase(generateQJSSetTempValue(qjsVar, qjsVal));
+                    writeQJSTrailingSemicolon();
+                    writeQJSLine(2);
+                    break;
+                default:
+                    Debug.fail("qjs emitter: wrong type in generateQJSNumberTypeCast.");
+                    break;
+            }
+        }
+
+        function emitQJSVariableDeclaration(node: VariableDeclaration) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            //if ((node.parent && isLet(node.parent)) || isLet(node) ||
+            //    isVarConst(node)) {
+                // put_var_init
+                let qjsVal: QJSVar | undefined;
+                if (node.initializer) {
+                    qjsVal = popQJSValueStack();
+                }
+
+                const qjsVar = popQJSValueStack();
+
+                const originNode = getParseTreeNode(node);
+                if (!!originNode && !!originNode.parent && originNode.parent.kind === SyntaxKind.CatchClause) {
+                    qjsVal = popQJSValueStack();
+                }
+
+                if (!qjsVal) {
+                    return;
+                }
+
+                if (qjsVar === qjsVal) {
+                    qjsVar.jsvar!.needsync = true;
+                    qjsVar.jsvar!.inited = true;
+                    writeQJSLine(2);
+                    return;
+                }
+
+                switch (qjsVal.type) {
+                    case QJSCType.Number:
+                    case QJSCType.Tag:
+                        // don't know value's type exactly, go runtime conversion path
+                        Debug.fail("qjs emitter: unsupported now slow path.");
+                        break;
+                    case QJSCType.IntLiteral:
+                    case QJSCType.FloatLiteral:
+                    case QJSCType.Int:
+                    case QJSCType.Double:
+                    case QJSCType.Bool:
+                        // already know value's type
+                        if (qjsVar.type === qjsVal.type) {
+                            Debug.fail("qjs emitter: unsupported variable initializer type.");
+                        }
+                        else {
+                            emitQJSNumberTypeAssignmentCast(qjsVar, qjsVal);
+                        }
+                        break;
+                    case QJSCType.JSValue:
+                        if (qjsVal.jsvar &&
+                            qjsVal.jsvar.kind === QJSJSVarKind.GlobalVar &&
+                            !qjsVal.jsvar.inited) {
+                            emitQJSInitGlobalVar(qjsVal);
+                        }
+
+                        writeQJSBase(generateQJSSetValue(qjsVar, qjsVal));
+                        writeQJSTrailingSemicolon();
+                        writeQJSLine(2);
+                        break;
+                    default:
+                        Debug.log("qjs emitter: unsupported variable initializer type.");
+                        break;
+                }
+            //}
+        }
 
         function emitVariableDeclaration(node: VariableDeclaration) {
+            qjsEmitterState = QJSValueStackState.LValue;
             emit(node.name);
             emit(node.exclamationToken);
             emitTypeAnnotation(node.type);
+            qjsEmitterState = QJSValueStackState.RValue;
             emitInitializer(node.initializer, node.type?.end ?? node.name.emitNode?.typeNode?.end ?? node.name.end, node, parenthesizer.parenthesizeExpressionForDisallowedComma);
+            qjsEmitterState = QJSValueStackState.None;
+
+            emitQJSVariableDeclaration(node);
         }
 
         function emitVariableDeclarationList(node: VariableDeclarationList) {
@@ -3146,8 +6723,24 @@ namespace ts {
             writeKeyword("function");
             emit(node.asteriskToken);
             writeSpace();
+
+            qjsEmitterState = QJSValueStackState.RValue;
             emitIdentifierName(node.name);
+            qjsEmitterState = QJSValueStackState.None;
+            // qjs emitter
+            if (!!printerOptions.emitQJSCode) {
+                const func = popQJSValueStack();
+                emitQJSFunctionBegin(node, QJSReserved.FuncPrefix, func.jsvar!.name, QJSCType.JSValue);
+                const origin_node = getParseTreeNode(node);
+                emitQJSVarDefList(origin_node);
+            }
+
             emitSignatureAndBody(node, emitSignatureHead);
+
+            // qjs emitter
+            if (!!printerOptions.emitQJSCode) {
+                emitQJSFunctionEnd(node);
+            }
         }
 
         function emitSignatureAndBody(node: FunctionLikeDeclaration, emitSignatureHead: (node: SignatureDeclaration) => void) {
@@ -3289,6 +6882,10 @@ namespace ts {
                 increaseIndent();
             }
 
+            if (!!printerOptions.emitQJSCode) {
+                emitQJSClassDeclarationPrologue(node);
+            }
+
             emitTypeParameters(node, node.typeParameters);
             emitList(node, node.heritageClauses, ListFormat.ClassHeritageClauses);
 
@@ -3299,6 +6896,48 @@ namespace ts {
 
             if (indentedFlag) {
                 decreaseIndent();
+            }
+
+            function emitQJSClassDeclarationPrologue(node: ClassDeclaration | ClassExpression) {
+                if (!node.heritageClauses) {
+                    // not extends
+                    const jsName = getTextOfNode(node.name!, false);
+                    const varAtomName = qjsTypeInfo[QJSCType.JSAtom].prefix + jsName;
+                    const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, varAtomName, true, true);
+                    qjsAtomMap.set(jsName, qjsAtomVar);
+
+                    const jsCtor = node.members.find(((m) => {
+                        return m.kind === SyntaxKind.Constructor;
+                    }));
+                    let qjsCtorVar: QJSVar | undefined;;
+                    if (!!jsCtor) {
+                        // has constructor defined.
+                        qjsCtorVar = emitQJSClassConstructor(jsCtor as ConstructorDeclaration);
+                    }
+                    else {
+                        qjsCtorVar = undefined;
+                    }
+
+                    //const  ctor_name = QJSReserved.FuncPrefix + "ctor_" + jsName;
+                    if (!!qjsCtorVar) {
+                        writeQJSBase(generateQJSJSDefineClass(qjsCtorVar, qjsAtomVar));
+                        writeQJSTrailingSemicolon();
+                    }
+                }
+                else {
+                    // TODO
+                    // extends parent class
+                }
+
+
+                function emitQJSClassConstructor(ctor: ConstructorDeclaration): QJSVar {
+                    writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                    writeQJSSpace();
+                    const tempVar = prepareQJSTempVar(QJSCType.JSValue, QJSJSType.Object);
+                    popQJSValueStack();
+                    emitQJSNewCFunction2(tempVar, "constructor", ctor.parameters.length, QJSReserved.JS_CFUNC_constructor);
+                    return tempVar;
+                }
             }
         }
 
@@ -3725,8 +7364,44 @@ namespace ts {
             emitList(node, node.types, ListFormat.HeritageClauseTypes);
         }
 
+        function emitQJSCatchBegin(node: CatchClause) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            if (qjsConfig.useCPlusPlus) {
+                writeQJSKeyword(QJSReserved.Catch);
+            }
+
+            writeQJSSpace();
+
+            qjsCurBlockType = QJSBlockType.Catch;
+
+            Debug.assert(node.locals!.size === 1);
+            writeQJSPunctuation("(");
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+
+            const exceptionObj = prepareQJSTempVar(QJSCType.JSValue, QJSJSType.Unknown);
+            writeQJSBase(exceptionObj.name);
+
+            writeQJSPunctuation(")");
+            writeQJSSpace();
+            emitQJSBlockBegin(node);
+            emitQJSVarDefList(node);
+        }
+
+        function emitQJSCatchEnd() {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            emitQJSBlockEnd();
+        }
+
         function emitCatchClause(node: CatchClause) {
             const openParenPos = emitTokenWithComment(SyntaxKind.CatchKeyword, node.pos, writeKeyword, node);
+            emitQJSCatchBegin(node);
             writeSpace();
             if (node.variableDeclaration) {
                 emitTokenWithComment(SyntaxKind.OpenParenToken, openParenPos, writePunctuation, node);
@@ -3735,11 +7410,48 @@ namespace ts {
                 writeSpace();
             }
             emit(node.block);
+
+            emitQJSCatchEnd();
         }
 
         //
         // Property assignments
         //
+
+        function emitQJSPropertyAssignment(node: PropertyName) {
+            const qjsRight = popQJSValueStack();
+            const qjsLeft = peekQJSValueStack();
+            const propName = getTextOfNode(node, false);
+            const propAtom = qjsAtomMap.get(propName)!;
+            const jsVar = qjsNewJSVar(generateQJSPropSymbol(qjsLeft, propName), qjsRight.jstype, QJSJSVarKind.Prop, qjsRight);
+            if (qjsLeft.jsvar) {
+                qjsLeft.jsvar.uses.push(jsVar);
+            }
+            //const qjsJSVarMap = qjsGetCurFrame().jsvarmap;
+            //qjsJSVarMap.set(generateQJSPropSymbol(qjsLeft, propAtom.name), jsvar);
+
+            let val = "";
+            switch (qjsRight.type) {
+                case QJSCType.IntLiteral:
+                case QJSCType.FloatLiteral:
+                case QJSCType.Int:
+                case QJSCType.Double:
+                    val = generateQJSMKVal(qjsRight);
+                    break;
+                case QJSCType.JSValue:
+                    val = qjsRight.name;
+                    break;
+                default:
+                    Debug.fail("qjs emitter: unsupported type now.");
+                    break;
+            }
+            writeQJSBase(generateQJSDefinePropertyValue(qjsLeft, propAtom.name,
+                val, "JS_PROP_C_W_E | JS_PROP_THROW"));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            qjsRight.needfree = false;
+        }
 
         function emitPropertyAssignment(node: PropertyAssignment) {
             emit(node.name);
@@ -3758,6 +7470,10 @@ namespace ts {
                 emitTrailingCommentsOfPosition(commentRange.pos);
             }
             emitExpression(initializer, parenthesizer.parenthesizeExpressionForDisallowedComma);
+
+            if (!!printerOptions.emitQJSCode) {
+                emitQJSPropertyAssignment(node.name);
+            }
         }
 
         function emitShorthandPropertyAssignment(node: ShorthandPropertyAssignment) {
@@ -4033,15 +7749,2070 @@ namespace ts {
             }
         }
 
+        // type checker will guarantee the name is unique.
+        // so that I just simply add a type prefix to var name.
+        // but note: new name might violate var naming spec(length) in C.
+        function generateQJSVarName(type: QJSCType, name: string, isRef = false): string {
+            const prefix = qjsTypeInfo[type].prefix;
+            const baseName = prefix + name;
+            return isRef ? "*" + baseName : baseName;
+        }
+
+        function isUniqueQJSName(name: string): boolean {
+            return !qjsGeneratedNames.has(name)
+                && !(qjsReservedScopeNames && qjsReservedScopeNames.has(name));
+        }
+
+        function makeQJSUniqueName(baseName: string, checkFn: (name: string) => boolean = isUniqueQJSName, optimistic?: boolean, scoped?: boolean): string {
+            if (optimistic) {
+                if (checkFn(baseName)) {
+                    if (scoped) {
+                        qjsReserveNameInNestedScopes(baseName);
+                    }
+                    else {
+                        qjsGeneratedNames.add(baseName);
+                    }
+                    return baseName;
+                }
+            }
+            // Find the first unique 'name_n', where n is a positive number
+            if (baseName.charCodeAt(baseName.length - 1) !== CharacterCodes._) {
+                baseName += "_";
+            }
+            let i = 1;
+            while (true) {
+                const generatedName = baseName + i;
+                if (checkFn(generatedName)) {
+                    if (scoped) {
+                        qjsReserveNameInNestedScopes(generatedName);
+                    }
+                    else {
+                        qjsGeneratedNames.add(generatedName);
+                    }
+                    return generatedName;
+                }
+                i++;
+            }
+        }
+
+        function generateQJSTempVarName(type: QJSCType): string {
+            const name = generateQJSVarName(type, QJSReserved.QJSTempVarName);
+            return makeQJSUniqueName(name, isUniqueQJSName, true, true);
+        }
+
+        function generateQJSNewAtom(param: string): string {
+            const func = QJSFunction.JS_NewAtom + "(" + QJSReserved.DefaultCtx + ", \"" + param + "\")";
+            return func;
+        }
+
+        function generateQJSNewCFunction(name: string, paramCount: number): string {
+            const cfunc_name = QJSReserved.FuncPrefix + name;
+            const func = QJSFunction.JS_NewCFunction2 + "(" + QJSReserved.DefaultCtx + ", " +
+                        cfunc_name + ", \"" + name + "\", "+ paramCount + ")";
+            return func;
+        }
+
+        function generateQJSNewCFunction2(name: string, paramCount: number, cproto: string, magic: number): string {
+            const cfunc_name = QJSReserved.FuncPrefix + name;
+            const func = QJSFunction.JS_NewCFunction2 + "(" + QJSReserved.DefaultCtx + ", " +
+                        cfunc_name + ", \"" + name + "\", "+ paramCount + ", " + cproto + ", " + magic + ")";
+            return func;
+        }
+
+        function generateQJSNewObject(): string {
+            return QJSFunction.JS_NewObject + "(" + QJSReserved.DefaultCtx + ")";
+        }
+
+        function generateQJSNewArray(): string {
+            return QJSFunction.JS_NewArray + "(" + QJSReserved.DefaultCtx + ")";
+        }
+
+        function generateQJSNewString(text: string): string {
+            if (text.length < 64) {
+                return QJSFunction.JS_NewString + "(" + QJSReserved.DefaultCtx + ", " + text + ")";
+            }
+            else {
+                Debug.fail("qjs emitter: too long string, cannot put as argument directly.");
+            }
+        }
+
+        function generateQJSConcatString(left: string, right: string): string {
+            left = generateQJSDupValue(left);
+            right = generateQJSDupValue(right);
+            return QJSFunction.JS_ConcatString + "(" + QJSReserved.DefaultCtx + ", " + left + ", " + right +")";
+        }
+
+        function generateQJSFreeAtom(atom: QJSVar): string {
+            const func = QJSFunction.JS_FreeAtom + "(" + QJSReserved.DefaultCtx + ", " + atom.name + ")";
+            return func;
+        }
+
+        function generateQJSFreeValue(val: QJSVar): string {
+            const func = QJSFunction.JS_FreeValue + "(" + QJSReserved.DefaultCtx + ", " + val.name + ")";
+            return func;
+        }
+
+        function generateQJSDefineGlobalVar(atom: QJSVar): string {
+            const flags = "DEFINE_GLOBAL_LEX_VAR | JS_PROP_WRITABLE";
+            const func = QJSFunction.JS_DefineGlobalVar+ "(" +
+                        QJSReserved.DefaultCtx + ", " + atom.name + ", " + flags + ")";
+            return func;
+        }
+
+        function generateQJSDefineGlobalFunction(prop: string, func: QJSVar ,flags: string): string {
+            const code = QJSFunction.JS_DefineGlobalFunction+ "(" +
+                        QJSReserved.DefaultCtx + ", " + prop + ", " + func.name + ", " + flags + ")";
+            return code;
+        }
+
+        function generateQJSDefinePropertyValue(obj: QJSVar , prop: string, val: QJSVar | string, flags: string): string {
+            let valName = "";
+            if (typeof val === "string") {
+                valName = val;
+            }
+            else {
+                valName = val.name;
+            }
+            const func = QJSFunction.JS_DefinePropertyValue+ "(" +
+                        QJSReserved.DefaultCtx + ", " + obj.name + ", " + prop + ", " + valName + ", " + flags + ")";
+            return func;
+        }
+
+        function generateQJSSetProperty(obj: QJSVar | string, prop: string, val: QJSVar | string, flags = "JS_PROP_THROW"): string {
+            let objName = "";
+            if (typeof obj === "string") {
+                objName = obj;
+            }
+            else {
+                objName = obj.name;
+            }
+
+            let valName = "";
+            if (typeof val === "string") {
+                valName = val;
+            }
+            else {
+                valName = val.name;
+            }
+            const func = QJSFunction.JS_SetPropertyInternal+ "(" +
+                        QJSReserved.DefaultCtx + ", " + objName + ", " + prop + ", " + valName + ", " + flags + ")";
+            return func;
+        }
+
+        function generateQJSSetPropertyUint32(obj: QJSVar | string, index: string, val: QJSVar | string): string {
+            let objName = "";
+            if (typeof obj === "string") {
+                objName = obj;
+            }
+            else {
+                objName = obj.name;
+            }
+
+            let valName = "";
+            if (typeof val === "string") {
+                valName = val;
+            }
+            else {
+                valName = val.name;
+            }
+            const func = QJSFunction.JS_SetPropertyUint32+ "(" +
+                        QJSReserved.DefaultCtx + ", " + objName + ", " + index + ", " + valName + ")";
+            return func;
+        }
+
+        function generateQJSGetElementValue(obj: QJSVar | string, index: QJSVar): string {
+            let objName = "";
+            if (typeof obj === "string") {
+                objName = obj;
+            }
+            else {
+                objName = obj.name;
+            }
+
+            let indexName = index.name;
+            if (index.type !== QJSCType.JSValue) {
+                indexName = generateQJSMKVal(index);
+            }
+
+            const func = QJSFunction.JS_GetElementValue+ "(" +
+                        QJSReserved.DefaultCtx + ", " + objName + ", " + indexName + ")";
+
+            index.needfree = false;
+            return func;
+        }
+/*
+        function generateQJSGetPropertyUint32(obj: QJSVar | string, index: string): string {
+            let objName = "";
+            if (typeof obj === "string") {
+                objName = obj;
+            }
+            else {
+                objName = obj.name;
+            }
+
+            const func = QJSFunction.JS_GetPropertyUint32+ "(" +
+                        QJSReserved.DefaultCtx + ", " + objName + ", " + index + ")";
+            return func;
+        }
+*/
+        function generateQJSSetPropertyInt64(obj: QJSVar | string, index: QJSVar, val: QJSVar | string): string {
+            let objName = "";
+            if (typeof obj === "string") {
+                objName = obj;
+            }
+            else {
+                objName = obj.name;
+            }
+
+            let valName = "";
+            if (typeof val === "string") {
+                valName = val;
+            }
+            else {
+                valName = val.name;
+            }
+
+            let indexName = index.name
+            if (index.type === QJSCType.JSValue) {
+                indexName = generateQJSJSValueGetInt(index);
+            }
+            const func = QJSFunction.JS_SetPropertyInt64+ "(" +
+                        QJSReserved.DefaultCtx + ", " + objName + ", " + indexName + ", " + valName + ")";
+            return func;
+        }
+
+        function generateQJSSetPropertyInt(obj: QJSVar | string, index: QJSVar, val: QJSVar | string): string {
+            if (index.value && +index.value >= (0xffffffff)) {
+                return generateQJSSetPropertyInt64(obj, index, val);
+            }
+            else {
+                return generateQJSSetPropertyUint32(obj, index.name, val);
+            }
+        }
+
+        function generateQJSGetProperty(obj: QJSVar | string, prop: string, flags = "0"): string {
+            let objName = "";
+            if (typeof obj === "string") {
+                objName = obj;
+            }
+            else {
+                objName = obj.name;
+            }
+            const func = QJSFunction.JS_GetPropertyInternal+ "(" +
+                        QJSReserved.DefaultCtx + ", " + objName + ", " + prop + ", " + objName + ", " + flags + ")";
+            return func;
+        }
+
+        function generateQJSGetPropertyValue(obj: QJSVar | string, prop: QJSVar): string {
+            let objName = "";
+            if (typeof obj === "string") {
+                objName = obj;
+            }
+            else {
+                objName = obj.name;
+            }
+
+            let propName = prop.name;
+            if (prop.type !== QJSCType.JSValue) {
+                propName = generateQJSMKVal(prop);
+            }
+            const func = QJSFunction.JS_GetPropertyValue+ "(" +
+                        QJSReserved.DefaultCtx + ", " + objName + ", " + propName + ")";
+
+            prop.needfree = false;
+            return func;
+        }
+
+        function generateQJSAddModuleExportByAtom(exportName: QJSVar): string {
+            return QJSFunction.JS_AddModuleExportByAtom + "(" +
+            QJSReserved.DefaultCtx + ", module, " + exportName.name + ")";
+        }
+
+        function generateQJSAddModuleImportByAtom(exportName: QJSVar, localIndex: number): string {
+            return QJSFunction.JS_AddModuleImportByAtom + "(" +
+            QJSReserved.DefaultCtx + ", module, " + exportName.name + ", " + localIndex + ")";
+        }
+
+        function generateQJSAddReqModule(moduleName: QJSVar): string {
+            return QJSFunction.JS_AddReqModule + "(" +
+            QJSReserved.DefaultCtx + ", module, " + moduleName.name + ")";
+        }
+
+        function generateQJSNewBool(qjsVar: QJSVar): string {
+            const val = (qjsVar.value && qjsVar.jstype === QJSJSType.NumLiteral) ? qjsVar.value : qjsVar.name;
+            const func = QJSFunction.JS_MKVAL + "(" + QJSReserved.JS_TAG_BOOL + ", " + val + ")";
+            return func;
+        }
+
+        function generateQJSNewInt32(qjsVar: QJSVar): string {
+            const val = (qjsVar.value && qjsVar.jstype === QJSJSType.NumLiteral) ? qjsVar.value : qjsVar.name;
+            const func = QJSFunction.JS_MKVAL + "(" + QJSReserved.JS_TAG_INT + ", " + val + ")";
+            return func;
+        }
+
+
+        function generateQJSNewFloat64(qjsVar: QJSVar): string {
+            const val = (qjsVar.value && qjsVar.jstype === QJSJSType.NumLiteral) ? qjsVar.value : qjsVar.name;
+            const func = QJSFunction.JS_NewFloat64 + "(" + QJSReserved.DefaultCtx + ", " + val + ")";
+            return func;
+        }
+
+        function generateQJSGetGlobalVar(atom: QJSVar): string {
+            return QJSFunction.JS_GetGlobalVar + "(" +
+                                    QJSReserved.DefaultCtx + ", " + atom.name + ", false)";
+        }
+
+        function generateQJSSetGlobalVar(atom: QJSVar, val: QJSVar | string, flags = "2"): string {
+            let valName = "";
+            if (typeof val !== "string") {
+                valName = val.name;
+            }
+            else {
+                valName = val;
+            }
+            return QJSFunction.JS_SetGlobalVar + "(" +
+                                    QJSReserved.DefaultCtx + ", " + atom.name + ", " +
+                                    valName + ", " + flags + ")";
+        }
+
+        function generateQJSSetAndGetModuleExportVarRefByIndex(index: number, atomName: QJSVar, val: QJSVar) {
+            return QJSFunction.JS_SetAndGetModuleExportVarRefByIndex + "(" +
+                                    QJSReserved.DefaultCtx + ", m, " + index + ", " +
+                                    atomName.name + ", " + val.name + ")";
+        }
+
+        function generateQJSGetVarRefFromModuleExport(exportIndex: number) {
+            return QJSFunction.JS_GetVarRefFromModuleExport + "(" +
+            QJSReserved.DefaultCtx + ", m, " + exportIndex + ")";
+        }
+
+        function generateQJSCreateModuleVar(islexical: string): string {
+            return QJSFunction.JS_CreateModuleVar + "(ctx, " + islexical + ")";
+        }
+
+        function generateQJSMKVal(qjsVal: QJSVar) {
+            switch (qjsVal.type) {
+                case QJSCType.IntLiteral:
+                case QJSCType.Int:
+                    return generateQJSNewInt32(qjsVal);
+                    break;
+                case QJSCType.FloatLiteral:
+                case QJSCType.Double:
+                    return generateQJSNewFloat64(qjsVal);
+                    break;
+                case QJSCType.Bool:
+                    return generateQJSNewBool(qjsVal);
+                    break;
+                case QJSCType.JSValue:
+                    return qjsVal.name;
+                    break;
+                default:
+                    Debug.fail("qjs emitter: unsupported type in generateQJSMKVal");
+                    break;
+            }
+        }
+
+        function generateQJSSetTempValue(target: QJSVar, val: QJSVar): string {
+            Debug.assert(val.type !== QJSCType.JSValue && val.type !== QJSCType.JSAtom);
+            let func = "";
+            const mkval = generateQJSMKVal(val);
+            if (target.jstype < QJSJSType.RefType) {
+                func = target.name + " = " + mkval;
+            }
+            else {
+                const targetName = target.name.charAt(0) === "*" ? target.name.substring(1) : "&" + target.name;
+                func = QJSFunction.JS_SetValue + "(" +
+                                QJSReserved.DefaultCtx + ", " + targetName + ", " +
+                                mkval + ")";
+            }
+
+            /*
+            if (val.type === QJSCType.Int) {
+                target.jstype = QJSJSType.Int32;
+            }
+            else if (val.type === QJSCType.Double) {
+                target.jstype = QJSJSType.Float64;
+            }
+            else {
+                Debug.fail("qjs emitter: unsupported type in generateQJSSetTempValue");
+            }
+            */
+
+            target.jstype = val.jstype;
+            target.value = val.value;
+            if (target.jsvar) {
+                target.jsvar.type = target.jstype;
+                target.jsvar.value = target.value;
+                target.jsvar.inited = true;
+                target.jsvar.needsync = true;
+
+                //const atomVar = getQJSVarByType(target.jsvar, QJSCType.JSAtom);
+                //if (atomVar) {
+                //    target.jsvar.writeBack = true;
+                //}
+            }
+
+            val.needfree = false;
+
+            return func;
+        }
+
+        function generateQJSSetValue(target: QJSVar, val: QJSVar): string {
+            let func = "";
+            if (target.jstype < QJSJSType.RefType) {
+                func = target.name + " = " + val.name;
+            }
+            else {
+                const targetName = target.name.charAt(0) === "*" ? target.name.substring(1) : "&" + target.name;
+                func = QJSFunction.JS_SetValue + "(" +
+                                QJSReserved.DefaultCtx + ", " + targetName + ", " +
+                                val.name + ")";
+            }
+
+            target.jstype = val.jstype;
+            target.value = val.value;
+            if (target.jsvar) {
+                target.jsvar.type = val.jstype;
+                target.jsvar.value = target.value;
+                target.jsvar.inited = true;
+                target.jsvar.needsync = true;
+
+                //const atomVar = getQJSVarByType(target.jsvar, QJSCType.JSAtom);
+                //if (atomVar) {
+                //    target.jsvar.writeBack = true;
+                //}
+            }
+
+            val.needfree = false;
+
+            return func;
+        }
+
+        function generateQJSDupValue(val: QJSVar | string): string {
+            if (typeof val !== "string") {
+                const func = QJSFunction.JS_DupValue + "(" +
+                                QJSReserved.DefaultCtx + ", " +
+                                val.name + ")";
+                return func;
+            }
+            else {
+                const func = QJSFunction.JS_DupValue + "(" +
+                                QJSReserved.DefaultCtx + ", " +
+                                val + ")";
+                return func;
+            }
+        }
+/*
+        function generateQJSJSValueGetTag(qjsVar: QJSVar | string): string {
+            if (typeof qjsVar !== "string") {
+                return QJSFunction.JS_VALUE_GET_TAG + "(" +
+                    qjsVar.name + ")";
+            }
+            else {
+                return QJSFunction.JS_VALUE_GET_TAG + "(" +
+                    qjsVar + ")";
+            }
+        }
+*/
+        function generateQJSJSToBool(val: QJSVar): string {
+            return QJSFunction.JS_ToBool + "(ctx, " +
+                    val.name + ")";
+        }
+
+        function generateQJSJSValueGetBool(val: QJSVar | string): string {
+            if (typeof val !== "string") {
+                return QJSFunction.JS_VALUE_GET_BOOL + "(" +
+                    val.name + ")";
+            }
+            else {
+                return QJSFunction.JS_VALUE_GET_BOOL + "(" +
+                    val + ")";
+            }
+        }
+
+        function generateQJSJSValueGetInt(val: QJSVar | string): string {
+            if (typeof val !== "string") {
+                return QJSFunction.JS_VALUE_GET_INT + "(" +
+                    val.name + ")";
+            }
+            else {
+                return QJSFunction.JS_VALUE_GET_INT + "(" +
+                    val + ")";
+            }
+        }
+
+        function generateQJSJSValueGetFloat64(val: QJSVar | string): string {
+            if (typeof val !== "string") {
+                return QJSFunction.JS_VALUE_GET_FLOAT64 + "(" +
+                    val.name + ")";
+            }
+            else {
+                return QJSFunction.JS_VALUE_GET_FLOAT64 + "(" +
+                    val + ")";
+            }
+        }
+
+        function generateQJSJSDefineClass(ctor: QJSVar | string, atom: QJSVar): string {
+            let ctor_name = "";
+            if (typeof ctor !== "string") {
+                ctor_name = ctor.name;
+            }
+            else {
+                ctor_name = ctor;
+            }
+            return QJSFunction.JS_DefineClass + "(ctx, " + ctor_name + ", " +
+                atom.name + ", NULL, 0, sf, FALSE)";
+        }
+
+/*
+        function generateQJSAssignNumber(qjsVar: QJSVar, qjsVal: QJSVar): string {
+                return qjsVar.name + " = " + qjsVal.name;
+        }
+*/
+        function generateQJSMemberNames(node: Node | undefined) {
+            if (!node) {
+                return;
+            }
+
+            const jsName = getTextOfNode((node as NamedDeclaration).name!, false);
+            const varAtomName = qjsTypeInfo[QJSCType.JSAtom].prefix + jsName;//qjsAtomIndex.toString();
+            const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, varAtomName, true, true);
+            qjsAtomMap.set(jsName, qjsAtomVar);
+            //qjsAtomIndex ++;
+        }
+/*
+        function generateQJSGlobalSymbol(symbol: string): string {
+            return QJSReserved.DefaultObject + "|" + symbol;
+        }
+*/
+        function generateQJSPropSymbol(obj: QJSVar, symbol: string): string {
+            return obj.name + "|" + symbol;
+        }
+
+        function generateQJSUpdateFrameBuf1(argCount: string, varCount: string): string {
+            return QJSFunction.JS_UPDATE_SF_FUNC + "(ctx, argc, argv, " + argCount + ", " + varCount + ")";
+        }
+
+        function generateQJSUpdateFrameBuf2(argCount: string, varCount: string): string  {
+            return QJSFunction.JS_UPDATE_SF_MACRO + "(ctx, sf, argc, argv, " + argCount + ", " + varCount + ")";
+        }
+
+        function qjsPushVar(qjsVar: QJSVar): number {
+            if (qjsVar.type === QJSCType.JSAtom) {
+                return -1;
+            }
+
+            const curFrame = qjsGetCurFrame();
+            const len = curFrame.vars.push(qjsVar);
+            return len - 1;
+        }
+
+        function qjsNewVar(jsVar: QJSJSVar | undefined, ctype: QJSCType, varName: string, needFree = true, isGlobal = false): QJSVar {
+            const qjsVar: QJSVar = {frame: ctype !== QJSCType.JSAtom? qjsGetCurFrame() : undefined,
+                                    type: ctype,
+                                    name: varName,
+                                    value: undefined,
+                                    needfree: needFree,
+                                    flags: 0,
+                                    jstype: jsVar ? jsVar.type : QJSJSType.Unknown,
+                                    jsvar: jsVar,
+                                    define: undefined,
+                                    use: undefined};
+
+            if (qjsVar.jsvar && qjsVar.jsvar.type < QJSJSType.RefType) {
+                qjsVar.needfree = false;
+            }
+
+            if (qjsVar.type === QJSCType.JSAtom) {
+                qjsVar.needfree = true;
+            }
+
+            if (!isGlobal) {
+                qjsPushVar(qjsVar);
+            }
+            else {
+
+            }
+
+            return qjsVar;
+        }
+
+        function qjsNewJSVar(jsname: string, jstype: QJSJSType, jskind: QJSJSVarKind, qjsvar: QJSVar, frameDecl: QJSFrame | undefined = undefined): QJSJSVar {
+            const jsVar: QJSJSVar = {
+                name: jsname,
+                index: -1,
+                type: jstype,
+                kind: jskind,
+                outer: undefined,
+                inited: false,
+                needsync: false,
+                cvar: qjsvar,
+                uses: [],
+                frame: frameDecl ? frameDecl : qjsGetCurFrame(),
+                value: undefined,
+                flags: 0,
+            };
+
+
+            qjsvar.jsvar = jsVar;
+            qjsvar.jstype = jsVar.type;
+            if (jsVar.type < QJSJSType.RefType) {
+                qjsvar.needfree = false;
+            }
+            else {
+                qjsvar.needfree = true;
+            }
+
+            if (!frameDecl) {
+                frameDecl = qjsGetCurFrame();
+            }
+            const qjsJSVarMap = frameDecl.jsvarmap;
+            //qjsJSVarMap.set(generateQJSGlobalSymbol(qjsAtomVar.name), jsVar);
+            //if (jskind === QJSJSVarKind.GlobalVar) {
+            qjsJSVarMap.set(jsname, jsVar);
+            //}
+            return jsVar;
+        }
+
+        /*
+        function qjsPopVar(): {local: QJSVar | undefined, code: string} {
+            if (qjsContainerStack.length === 0) {
+                return {local: undefined, code: ""};
+            }
+
+            const qjsVar = qjsContainerStack.pop()!;
+            qjsJS2CVarMap.delete(qjsVar.varname);
+            let freeCode = "";
+            if (qjsVar.type === QJSCType.JSValue) {
+                freeCode = generateQJSFreeValue(qjsVar.varname);
+            }
+            else if (qjsVar.type === QJSCType.JSAtom) {
+                freeCode = generateQJSFreeAtom(qjsVar.varname);
+            }
+            return {local: qjsVar, code: freeCode};
+        }
+        */
+
+        function emitQJSNewAtom(qjsVar: QJSVar, param: string) {
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSNewAtom(param));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+            qjsVar.needfree = true;
+        }
+
+        function emitQJSGlobalVarDef(symbol: Symbol) {
+            const valDecl = symbol.valueDeclaration as VariableDeclaration;
+            const jsName = getTextOfNode(valDecl.name, false);
+            const type = checker!.getTypeOfSymbol(symbol);
+
+            let jsType = QJSJSType.Unknown;
+            if (type.flags & TypeFlags.Number) {
+                jsType = QJSJSType.Float64;
+            }
+
+            const varAtomName = qjsTypeInfo[QJSCType.JSAtom].prefix + jsName;//qjsAtomIndex.toString();
+            const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, varAtomName, true, true);
+            const varName = qjsTypeInfo[QJSCType.JSValue].prefix + jsName;
+            const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName);
+            const jsVar = qjsNewJSVar(jsName, jsType, QJSJSVarKind.GlobalVar, qjsVar);
+
+            qjsAtomMap.set(jsVar.name, qjsAtomVar);
+
+            writeQJSBase(generateQJSDefineGlobalVar(qjsAtomVar));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            emitQJSDeclareQJSVar(qjsVar);
+        }
+
+        function emitQJSLocalVarInit(ctype: QJSCType, index: number, varName: string): string {
+            writeQJSKeyword(qjsTypeInfo[ctype].type);
+            writeQJSSpace();
+            writeQJSKeyword(varName);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase("&sf->var_buf[" + index +"]");
+            //writeQJSKeyword(initVal);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+            return varName;
+        }
+
+        function emitQJSDeclareLocalNumberVar(localIndex: number, tagName: string | undefined, jsName: string) {
+            (tagName);
+            if (qjsConfig.emitUnboxNumVar) {
+            /*
+                const jsVar: QJSJSVar = {
+                    name: jsName,
+                    type: QJSJSType.Float64,
+                    kind: QJSJSVarKind.LocalVar,
+                    cvar: qjsIntVar,
+                };
+                let ctype = QJSCType.Tag;
+                let initVal: string = QJSReserved.JS_TAG_INT;
+                if (tagName) {
+                    initVal = generateQJSJSValueGetTag(tagName);
+                }
+
+                const tagVarName = emitQJSLocalVarInit(ctype, initVal, jsName);
+                const qjsTagVar = qjsNewVar(jsVar, ctype, tagVarName, false);
+
+
+                ctype = QJSCType.Int;
+                initVal = QJSReserved.IntInitVal;
+                const intVarName = emitQJSLocalVarInit(ctype, initVal, jsName);
+
+                const qjsIntVar = qjsNewVar(jsVar, ctype, intVarName, false);
+
+
+                ctype = QJSCType.Double;
+                initVal = QJSReserved.DoubleInitVal;
+
+                const doubleVarName = emitQJSLocalVarInit(ctype, initVal, jsName);
+                writeQJSLine(2);
+
+                const qjsDoubleVar = qjsNewVar(jsVar, ctype, doubleVarName, false);
+            */
+            }
+            else {
+                //const initVal = QJSReserved.JSUninitialized;
+
+                const varName = generateQJSVarName(QJSCType.JSValue, jsName, true);
+
+                const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName);
+                const jsvar = qjsNewJSVar(jsName, QJSJSType.Float64, QJSJSVarKind.LocalVar, qjsVar);
+                jsvar.index = localIndex;
+
+                emitQJSLocalVarInit(QJSCType.JSValue, localIndex, varName);
+
+            }
+        }
+
+        function emitQJSLocalVarDef(localIndex: number, symbol: Symbol) {
+            const valDecl = symbol.valueDeclaration as VariableDeclaration;
+            const jsName = getTextOfNode(valDecl.name, false);
+            const type = checker!.getTypeOfSymbol(symbol);
+            const ctype = QJSCType.JSValue;
+            //const initVal = QJSReserved.JSUninitialized;
+            if (type.flags & TypeFlags.Number) {
+                emitQJSDeclareLocalNumberVar(localIndex, undefined, jsName);
+            }
+            else {
+                const varName = generateQJSVarName(QJSCType.JSValue, jsName, true);
+
+                const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName, true);
+                const jsvar = qjsNewJSVar(jsName, QJSJSType.RefType, QJSJSVarKind.LocalVar, qjsVar);
+                jsvar.index = localIndex;
+
+                emitQJSLocalVarInit(ctype, localIndex, varName);
+            }
+        }
+
+        function emitQJSSetModuleExportByIndex(index: number, atomName: QJSVar, val: QJSVar) {
+            writeQJSBase(generateQJSSetAndGetModuleExportVarRefByIndex(index, atomName, val));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            val.needfree = false;
+        }
+
+        function emitQJSGetVarRefFromModuleExport(exportIndex: number) {
+            writeQJSBase(generateQJSGetVarRefFromModuleExport(exportIndex));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSModuleVarDef(localIndex: number, importOrExportIndex: number, symbol: Symbol) {
+            let decl: Declaration;
+            let isExport = false;
+            let isImport = false;
+            if (symbol.valueDeclaration) {
+                decl = symbol.valueDeclaration;
+            }
+            else if (symbol.exportSymbol &&
+                symbol.exportSymbol.valueDeclaration) {
+                    decl = symbol.exportSymbol.valueDeclaration;
+                    isExport = true;
+            }
+            else {
+                isImport = true;
+                decl = symbol.declarations![0];
+            }
+
+            let type: Type;
+            if (!isExport) {
+                type = checker!.getTypeOfSymbol(symbol);
+            }
+            else {
+                type = checker!.getTypeOfSymbol(symbol.exportSymbol!);
+            }
+
+            let jsName = "";
+            if (decl.kind === SyntaxKind.VariableDeclaration) {
+                jsName = getTextOfNode((decl as VariableDeclaration).name, false);
+            }
+            else if (decl.kind === SyntaxKind.ImportSpecifier) {
+                jsName = getTextOfNode((decl as ImportSpecifier).name, false);
+            }
+            else {
+                Debug.fail("qjs emitter: unsupported type now");
+            }
+
+            const varName = generateQJSVarName(QJSCType.JSValue, jsName, true);
+
+            const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName, true);
+            const jsvar = qjsNewJSVar(jsName, QJSJSType.RefType, QJSJSVarKind.ModuleVar, qjsVar);
+
+            if (type.flags & TypeFlags.Number ||
+                type.flags & TypeFlags.Boolean) {
+                qjsVar.needfree = false;
+            }
+
+            let isLexical = false;
+            if (!isImport) {
+                if (isLet(decl)) {
+                    isLexical = true;
+                }
+            }
+
+            if (isImport) {
+                //writeQJSBase("var_refs[" + localIndex + "]");
+                //writeQJSSpace();
+                //writeQJSPunctuation("=");
+                //writeQJSSpace();
+                ////writeQJSBase(generateQJSCreateModuleVar(isLexical ? "true" : "false"));
+                //writeQJSTrailingSemicolon();
+                //writeQJSLine();
+            }
+            else if (isExport) {
+                writeQJSBase("var_refs[" + localIndex + "]");
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+                emitQJSGetVarRefFromModuleExport(importOrExportIndex);
+            }
+            else {
+                writeQJSBase("var_refs[" + localIndex + "]");
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+                writeQJSBase(generateQJSCreateModuleVar(isLexical ? "true" : "false"));
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+
+            jsvar.index = localIndex;
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(varName);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase("var_refs[" + localIndex + "]->pvalue");
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            if (!isImport) {
+                writeQJSKeyword(varName);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+                writeQJSBase(isLexical ? QJSReserved.JSUninitialized : QJSReserved.JSUndefined);
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+        }
+/*
+        function emitQJSDupValue(qjsVar: QJSVar, val: QJSVar) {
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSDupValue(val));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSGetNumberValue(qjVar: QJSVar) {
+
+        }
+*/
+        function emitQJSDeclareArgNumberVar(index: number, tagName: string, jsName: string) {
+            if (qjsConfig.emitUnboxNumVar) {
+            /*
+                const jsVar: QJSJSVar = {name: jsName, type: QJSJSType.Float64, kind: QJSJSVarKind.Arg, cvars: []};
+                let ctype = QJSCType.Tag;
+                let initVal: string = QJSReserved.JS_TAG_INT;
+                if (tagName) {
+                    initVal = generateQJSJSValueGetTag(tagName);
+                }
+
+                const tagVarName = emitQJSLocalVarInit(ctype, initVal, jsName);
+                const qjsTagVar = qjsNewVar(jsVar, ctype, tagVarName, false);
+
+                ctype = QJSCType.Int;
+                initVal = QJSReserved.IntInitVal;
+                const intVarName = emitQJSLocalVarInit(ctype, initVal, jsName);
+
+                const qjsIntVar = qjsNewVar(jsVar, ctype, intVarName, false);
+
+                ctype = QJSCType.Double;
+                initVal = QJSReserved.DoubleInitVal;
+
+                const doubleVarName = emitQJSLocalVarInit(ctype, initVal, jsName);
+                writeQJSLine(2);
+
+                const qjsDoubleVar = qjsNewVar(jsVar, ctype, doubleVarName, false);
+                */
+            }
+            else {
+                const qjsArg = qjsNewVar(undefined, QJSCType.JSValue, tagName, false);
+                qjsNewJSVar(tagName, QJSJSType.Float64, QJSJSVarKind.Arg, qjsArg);
+
+                const varname = generateQJSVarName(QJSCType.JSValue, jsName, true);
+                const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varname);
+                const jsVar = qjsNewJSVar(jsName, QJSJSType.Float64, QJSJSVarKind.Arg, qjsVar);
+                jsVar.index = index;
+
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                //emitQJSDupValue(qjsVar, qjsArg);
+                writeQJSKeyword(qjsVar.name);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+                writeQJSKeyword(tagName);
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+        }
+
+        function emitQJSArgVarDef(index: number, symbol: Symbol) {
+            const valDecl = symbol.valueDeclaration as VariableDeclaration;
+            const name = getTextOfNode(valDecl.name);
+            const type = checker!.getTypeOfSymbol(symbol);
+            let argname = QJSReserved.DefaultArgv + "[" + index.toString() + "]";
+            writeQJSPunctuation("(");
+            writeQJSBase(argname);
+            writeQJSPunctuation(")");
+            writeQJSTrailingSemicolon();
+            writeQJSComment("// " + name);
+            writeQJSLine();
+
+            argname = "&sf->arg_buf" + "[" + index.toString() + "]";
+
+            if (type.flags & TypeFlags.Number) {
+                emitQJSDeclareArgNumberVar(index, argname, name);
+            }
+            else {
+                const qjsArg = qjsNewVar(undefined, QJSCType.JSValue, argname, false);
+                qjsNewJSVar(argname, QJSJSType.RefType, QJSJSVarKind.Arg, qjsArg);
+                qjsArg.needfree = false;
+
+                const varname = generateQJSVarName(QJSCType.JSValue, name, true);
+                const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varname);
+
+                let jstype: QJSJSType = QJSJSType.Object;
+                if (type.flags & TypeFlags.String) {
+                    jstype = QJSJSType.String;
+                }
+                else if (type.flags & TypeFlags.Any) {
+                    jstype = QJSJSType.Any;
+                }
+                const jsVar = qjsNewJSVar(name, jstype, QJSJSVarKind.Arg, qjsVar);
+                jsVar.index = index;
+                qjsVar.needfree = false; // I'm not sure if it is correct that removing arg ref count releasing within function
+
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+                writeQJSSpace();
+                //emitQJSDupValue(qjsVar, qjsArg);
+                writeQJSKeyword(qjsVar.name);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+                //writeQJSKeyword(generateQJSDupValue(argname));
+                writeQJSBase(argname);
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+        }
+
+        function emitQJSNewCFunction(func: QJSVar, jsname: string, paramCount: number) {
+            writeQJSKeyword(func.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSNewCFunction(jsname, paramCount));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            func.needfree = true;
+        }
+
+        function emitQJSNewCFunction2(func: QJSVar, jsname: string, paramCount: number, cproto: string, magic = 0) {
+            writeQJSKeyword(func.name);
+            writeQJSSpace();
+            writeQJSOperator("=");
+            writeQJSSpace();
+            writeQJSBase(generateQJSNewCFunction2(jsname, paramCount, cproto, magic));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            func.needfree = true;
+        }
+
+        function emitQJSCloseVarProperty(cvName: string, index: number, prop: string, value: string) {
+            writeQJSKeyword(cvName);
+            writeQJSBase("[" + index + "]");
+            writeQJSPunctuation(".");
+            writeQJSKeyword(prop);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase(value);
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSGlobalFunctionVarDef(symbol: Symbol) {
+            let jsName: string;
+            const funcDecl = symbol.valueDeclaration as FunctionDeclaration;
+
+            if (funcDecl.name) {
+                jsName = getTextOfNode(funcDecl.name, false);
+            }
+            else {
+                jsName = "";
+            }
+
+            const originNode = getParseTreeNode(funcDecl) as FunctionDeclaration;
+            let paramCount = 0;
+            if (originNode && originNode.parameters) {
+                paramCount = originNode.parameters.length;
+            }
+
+            const varName = generateQJSVarName(QJSCType.JSValue, jsName, false);
+            const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName);
+            const jsVar = qjsNewJSVar(jsName, QJSJSType.Function, QJSJSVarKind.GlobalVar, qjsVar);
+            jsVar.flags |= QJSJSVarFlags.isJSCFunction;
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+
+            emitQJSNewCFunction(qjsVar, jsName, paramCount);
+
+            let qjsAtomVar = qjsAtomMap.get(jsName);
+            if (!!jsName.length && !qjsAtomVar) {
+                const atomName = qjsTypeInfo[QJSCType.JSAtom].prefix + jsName;//qjsAtomIndex.toString();
+                qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, atomName, true, true);
+                qjsAtomMap.set(jsName, qjsAtomVar);
+            }
+
+            writeQJSBase(generateQJSDefineGlobalFunction(qjsAtomVar!.name, qjsVar, "0"));
+            writeQJSTrailingSemicolon();
+            writeQJSLine(2);
+
+            jsVar.inited = true;
+            jsVar.needsync = false;
+        }
+
+        function emitQJSLocalFunctionVarDef(localIndex: number, symbol: Symbol, argCount: number) {
+            let jsName: string;
+            const funcDecl = symbol.valueDeclaration as FunctionDeclaration;
+
+            if (funcDecl.name) {
+                jsName = getTextOfNode(funcDecl.name, false);
+            }
+            else {
+                jsName = "";
+            }
+
+            const originNode = getParseTreeNode(funcDecl) as FunctionDeclaration;
+            let paramCount = 0;
+            if (originNode && originNode.parameters) {
+                paramCount = originNode.parameters.length;
+            }
+
+            const varName = generateQJSVarName(QJSCType.JSValue, jsName, true);
+            const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName);
+            const jsVar = qjsNewJSVar(jsName, QJSJSType.Function, QJSJSVarKind.LocalVar, qjsVar);
+            jsVar.flags |= QJSJSVarFlags.isJSCFunction;
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSKeyword(qjsVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSKeyword("&sf->var_buf[" + localIndex +"]");
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+
+            emitQJSNewCFunction(qjsVar, jsName, paramCount);
+
+            jsVar.inited = true;
+            jsVar.needsync = false;
+
+            if (!funcDecl.closureVars ||
+                funcDecl.closureVars.length === 0) {
+                return;
+            }
+
+            function emitQJSInitClosure(func: QJSVar, jsName: string, funcDecl: FunctionDeclaration) {
+                const cvName = qjsTypeInfo[QJSCType.ClosureVar].prefix + jsName;
+                writeQJSKeyword(qjsTypeInfo[QJSCType.ClosureVar].type);
+                writeQJSSpace();
+                writeQJSKeyword(cvName);
+                writeQJSBase("[" + funcDecl.closureVars.length + "]");
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+
+                for (let i = 0; i < funcDecl.closureVars.length; i ++) {
+                    emitQJSCloseVarProperty(cvName, i, QJSReserved.CV_IS_ARG, funcDecl.closureVars[i].isArg ? "true" : "false");
+                    emitQJSCloseVarProperty(cvName, i, QJSReserved.CV_IS_LOCAL, funcDecl.closureVars[i].isLocal ? "true" : "false");
+                    emitQJSCloseVarProperty(cvName, i, QJSReserved.CV_IS_LEXICAL, funcDecl.closureVars[i].isLexcial ? "true" : "false");
+                    emitQJSCloseVarProperty(cvName, i, QJSReserved.CV_VAR_INDEX, (funcDecl.closureVars[i].index - argCount).toString());
+                    const atomName = qjsTypeInfo[QJSCType.JSAtom].prefix + funcDecl.closureVars[i].name;
+                    const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, atomName, true, true);
+                    qjsAtomMap.set(funcDecl.closureVars[i].name, qjsAtomVar);
+                    emitQJSCloseVarProperty(cvName, i, QJSReserved.CV_VAR_NAME, atomName);
+                }
+
+                writeQJSBase(QJSFunction.JS_CLOSURE_JSC + "(ctx, " + func.name + ", var_refs, " + cvName + ", " + funcDecl.closureVars.length + ", sf)");
+                writeQJSTrailingSemicolon();
+                writeQJSLine(2);
+            }
+
+            emitQJSInitClosure(qjsVar, jsName, funcDecl);
+        }
+
+        function emitQJSModuleFunctionVarDef(localIndex: number, importOrExportIndex: number, symbol: Symbol) {
+            let jsName: string;
+            let funcDecl: FunctionDeclaration;
+            let isExport = false;
+            let isImport = false;
+            if (symbol.valueDeclaration) {
+                funcDecl = symbol.valueDeclaration as FunctionDeclaration;
+            }
+            else if (symbol.exportSymbol &&
+                symbol.exportSymbol.valueDeclaration) {
+                    funcDecl = symbol.exportSymbol.valueDeclaration as FunctionDeclaration;
+                    isExport = true;
+            }
+            else {
+                isImport = true;
+                return;
+            }
+
+            if (funcDecl.name) {
+                jsName = getTextOfNode(funcDecl.name, false);
+            }
+            else {
+                jsName = "";
+            }
+
+            const originNode = getParseTreeNode(funcDecl) as FunctionDeclaration;
+            let paramCount = 0;
+            if (originNode && originNode.parameters) {
+                paramCount = originNode.parameters.length;
+            }
+
+            const varName = generateQJSVarName(QJSCType.JSValue, jsName, true);
+            const qjsVar = qjsNewVar(undefined, QJSCType.JSValue, varName);
+            const jsVar = qjsNewJSVar(jsName, QJSJSType.Function, QJSJSVarKind.ModuleVar, qjsVar);
+            jsVar.flags |= QJSJSVarFlags.isJSCFunction;
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+
+            const tempVar = prepareQJSTempVar(QJSCType.JSValue, QJSJSType.Object);
+            popQJSValueStack();
+            emitQJSNewCFunction(tempVar, jsName, paramCount);
+
+            let qjsAtomVar = qjsAtomMap.get(jsName);
+            if (!!jsName.length && !qjsAtomVar) {
+                const atomName = qjsTypeInfo[QJSCType.JSAtom].prefix + jsName;//qjsAtomIndex.toString();
+                qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, atomName, true, true);
+                qjsAtomMap.set(jsName, qjsAtomVar);
+            }
+
+            writeQJSBase("var_refs["+ localIndex + "]");
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            if (isExport && !isImport) {
+                emitQJSSetModuleExportByIndex(importOrExportIndex, qjsAtomVar!, tempVar);
+            }
+
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSValue].type);
+            writeQJSSpace();
+            writeQJSBase(qjsVar.name);
+            writeQJSSpace();
+            writeQJSPunctuation("=");
+            writeQJSSpace();
+            writeQJSBase("var_refs["+ localIndex + "]->pvalue");
+            writeQJSTrailingSemicolon();
+            writeLine();
+
+            qjsVar.needfree = false;
+
+            jsVar.inited = true;
+            jsVar.needsync = false;
+            jsVar.index = localIndex;
+        }
+
+        function emitQJSUpdateCallStackFrameBuf(argCount: number, varCount: number) {
+            writeQJSBase("JSStackFrame * sf = ");
+            writeQJSBase(generateQJSUpdateFrameBuf1(argCount.toString(), varCount.toString()));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+            writeQJSBase(generateQJSUpdateFrameBuf2(argCount.toString(), varCount.toString()));
+            writeQJSTrailingSemicolon();
+            writeQJSLine(2);
+        }
+
+        function checkQJSModifier(modifiers: ModifiersArray | undefined, modifier: SyntaxKind): boolean {
+            if (!modifiers) {
+                return false;
+            }
+
+            let found = false;
+            modifiers.forEach((value) => {
+                if (value.kind === modifier) {
+                    found = true;
+                    return;
+                }
+            });
+
+            return found;
+        }
+
+        function emitQJSVarDefList(node?: Node) {
+            if (!checker || !node || !node.locals) {
+                return;
+            }
+
+            const curFrame = qjsGetCurFrame();
+            const curFunc = qjsGetCurFunction(curFrame);
+            let varkind: QJSJSVarKind = QJSJSVarKind.LocalVar;
+            if (curFunc.kind === SyntaxKind.SourceFile) {
+                if (qjsEvalType === QJSEvalType.Global) {
+                    if (curFrame.container.kind === SyntaxKind.SourceFile) {
+                        varkind = QJSJSVarKind.GlobalVar;
+                    }
+                }
+                else {
+                    Debug.assert(qjsEvalType === QJSEvalType.Module);
+                    varkind = QJSJSVarKind.ModuleVar;
+                }
+            }
+
+            if (node.kind === SyntaxKind.FunctionDeclaration) {
+                const funcdecl = node as FunctionDeclaration;
+                emitQJSUpdateCallStackFrameBuf(funcdecl.parameters.length,
+                    funcdecl.localsCount - funcdecl.parameters.length);
+            }
+
+            let argCount = 0;
+            if (node.kind !== SyntaxKind.FunctionDeclaration &&
+                curFunc.kind === SyntaxKind.FunctionDeclaration) {
+                argCount = (curFunc as FunctionDeclaration).parameters.length;
+            }
+
+            let exportIndex = -1;
+            let importIndex = -1;
+            let localIndex = -1;
+            node.locals.forEach((value, _) => {
+                localIndex ++;
+
+                let valueDecl: Declaration;
+                const type = checker.getTypeOfSymbol(value);
+                (type);
+
+                if (value.valueDeclaration) {
+                    valueDecl = value.valueDeclaration;
+                    if (valueDecl.kind === SyntaxKind.VariableDeclaration &&
+                        valueDecl.parent.parent.kind === SyntaxKind.VariableStatement &&
+                        checkQJSModifier((valueDecl.parent.parent as VariableStatement).modifiers, SyntaxKind.DeclareKeyword)) {
+                        return;
+                    }
+                }
+                else if (value.exportSymbol &&
+                    value.exportSymbol.valueDeclaration) {
+                    valueDecl = value.exportSymbol.valueDeclaration;
+                    exportIndex ++;
+                }
+                else {
+                    valueDecl = value.declarations![0];
+                    importIndex ++;
+                }
+
+                const jsName = getTextOfNode((valueDecl as VariableDeclaration).name, false);
+                if (!!hasGlobalName!(jsName)) {
+                    varkind = QJSJSVarKind.GlobalVar;
+                }
+                switch (valueDecl.kind) {
+                    case SyntaxKind.VariableDeclaration:
+                        if (varkind === QJSJSVarKind.GlobalVar) {
+                            emitQJSGlobalVarDef(value);
+                        }
+                        else if (varkind === QJSJSVarKind.ModuleVar) {
+                            emitQJSModuleVarDef(localIndex, exportIndex, value);
+                        }
+                        else {
+                            Debug.assert(value.stackIndex !== undefined);
+                            emitQJSLocalVarDef(value.stackIndex - argCount, value);
+                        }
+                        break;
+                    case SyntaxKind.Parameter:
+                        emitQJSArgVarDef(argCount, value);
+                        argCount ++;
+                        break;
+                    case SyntaxKind.FunctionDeclaration:
+                        if (varkind === QJSJSVarKind.LocalVar) {
+                            emitQJSLocalFunctionVarDef(value.stackIndex! - argCount, value, argCount);
+                        }
+                        else if (varkind === QJSJSVarKind.ModuleVar) {
+                            emitQJSModuleFunctionVarDef(localIndex, exportIndex, value);
+                        }
+                        else {
+                            emitQJSGlobalFunctionVarDef(value);
+                        }
+
+                        break;
+                    case SyntaxKind.ImportSpecifier:
+                        //const type = checker!.getTypeOfSymbol(value);
+                        //if (type.flags & TypeFlags.Object) {
+                            emitQJSModuleVarDef(localIndex, importIndex, value);
+                        //}
+
+                        break;
+                    case SyntaxKind.ClassDeclaration:
+                        break;
+                    default:
+                        break;
+                }
+
+                writeQJSLine(2);
+            });
+        }
+
+        function qjsReserveNameInNestedScopes(name: string) {
+            if (!qjsReservedScopeNames || qjsReservedScopeNames === lastOrUndefined(qjsReservedNameStack)) {
+                qjsReservedScopeNames = new Set();
+            }
+            qjsReservedScopeNames.add(name);
+        }
+
+        function qjsPushNameGenerationScope(flags: EmitFlags = EmitFlags.None) {
+            if (flags & EmitFlags.ReuseTempVariableScope) {
+                return;
+            }
+
+            qjsReservedNameStack.push(qjsReservedScopeNames);
+        }
+
+        function qjsPopNameGenerationScope(flags: EmitFlags = EmitFlags.None) {
+            if (flags & EmitFlags.ReuseTempVariableScope) {
+                return;
+            }
+            qjsReservedScopeNames = qjsReservedNameStack.pop()!;
+        }
+
+        function qjsGetCurFunction(frame: QJSFrame): Node {
+            while(frame.preframe) {
+                if (frame.container.kind === SyntaxKind.FunctionDeclaration) {
+                    return frame.container;
+                }
+
+                frame = frame.preframe;
+            }
+
+            return frame.container;;
+        }
+
+        function qjsNewFrame(node: Node, frameName?: string): QJSFrame {
+            const isFunc = (node.kind === SyntaxKind.FunctionDeclaration);
+            const curFrame = qjsGetCurFrame();
+
+            let blocktype = "block";
+            switch (qjsCurBlockType) {
+                case QJSBlockType.IfThen:
+                    blocktype = "ifthen";
+                    break;
+                case QJSBlockType.IfElse:
+                    blocktype = "ifelse";
+                    break;
+                case QJSBlockType.FuncBody:
+                    blocktype = "func";
+                    break;
+                case QJSBlockType.Loop:
+                    blocktype = "loop";
+                    break;
+                default:
+                    break;
+            }
+
+            let frameid = "";
+
+            if (qjsCallFrames.length === 0) {
+                frameid = "root";
+            }
+            else {
+                frameid = curFrame.id + "->" + curFrame.children.length + ":" + blocktype;
+
+            }
+
+            if (frameName) {
+                frameid = frameName + ":" + blocktype;
+            }
+
+            let functionContainer: Node;
+            if (node.kind === SyntaxKind.SourceFile || node.kind === SyntaxKind.FunctionDeclaration) {
+                functionContainer = node;
+            }
+            else {
+                functionContainer = curFrame.function;
+            }
+
+            const newFrame: QJSFrame = {
+                id: frameid,
+                in: [],
+                children: [],
+                container: node,
+                function: functionContainer,
+                preframe: undefined,
+                needEmitReturn: isFunc,
+                vars: [],
+                jsvarmap: new Map<string, QJSJSVar>(),
+                phinodes: [],
+            };
+
+            newFrame.preframe = curFrame;
+            if (curFrame) {
+                curFrame.children.push(newFrame);
+            }
+
+            qjsCallFrames.push(newFrame);
+
+            return newFrame;
+        }
+
+        function emitQJSBlockBegin(node: Node, frameName?: string) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            qjsNewFrame(node, frameName);
+
+            writeTokenText(SyntaxKind.OpenBraceToken, writeQJSPunctuation);
+            writeQJSLine();
+            increaseQJSIndent();
+        }
+
+        function emitQJSBlockEnd() {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            emitQJSFreeVars();
+            if (qjsCallFrames.length === 1) {
+                //emitQJSCFunctionCall(QJSReserved.FreeAtomTableFunc, QJSReserved.DefaultCtx);
+            }
+            if (qjsGetCurFrame().needEmitReturn) {
+                writeQJSKeyword(QJSReserved.Return);
+                writeQJSSpace();
+                if (qjsEvalType === QJSEvalType.Global) {
+                    writeQJSKeyword(QJSReserved.JSUndefined);
+                }
+                else {
+                    writeQJSBase("0");
+                }
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+
+            decreaseQJSIndent();
+            writeTokenText(SyntaxKind.CloseBraceToken, writeQJSPunctuation);
+            qjsCallFrames.pop();
+        }
+
+        function emitQJSFunctionBegin(node: Node, prefix: string, name: string, rettype: QJSCType, signature: string = QJSReserved.DefaultFuncParams): string {
+            if (node.kind !== SyntaxKind.SourceFile) {
+                writeQJSPush();
+            }
+
+            const func_name = prefix + name;
+            qjsGeneratedNames.add(func_name);
+            const retval = qjsTypeInfo[rettype].type;
+            const func_def = QJSReserved.Static + " " + retval + " " + func_name + signature;
+            qjsFuncDecls.push(func_def);
+
+            writeQJSBase(func_def);
+            writeQJSLine();
+
+            const savedBlockType = qjsCurBlockType;
+            qjsCurBlockType = QJSBlockType.FuncBody;
+            emitQJSBlockBegin(node, func_name);
+            qjsCurBlockType = savedBlockType;
+
+            qjsPushNameGenerationScope();
+
+            qjsGetCurFrame().needEmitReturn = true;
+
+            return func_name;
+        }
+
+        function emitQJSFunctionEnd(node: Node) {
+            emitQJSBlockEnd();
+            qjsPopNameGenerationScope();
+            writeQJSLine(2);
+            if (node.kind !== SyntaxKind.SourceFile) {
+                writeQJSPop();
+            }
+        }
+
+        function emitQJSFunctionEvalFileBegin(node: SourceFile) {
+            const name = removeFileExtension(getBaseFileName(node.fileName));
+            const rettype = qjsEvalType === QJSEvalType.Module ? QJSCType.Int : QJSCType.JSValue;
+            const signature = qjsEvalType === QJSEvalType.Module ? QJSReserved.DefaultModuleFuncParams :
+                QJSReserved.DefaultFuncParams;
+            qjsInitFuncName = emitQJSFunctionBegin(node, QJSReserved.FileFuncPrefix, name, rettype, signature);
+        }
+
+        function emitQJSFreeAtom(atom: QJSVar) {
+            writeQJSBase(generateQJSFreeAtom(atom));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function emitQJSFreeValue(val: QJSVar) {
+            if (val.type !== QJSCType.JSValue ||
+                !val.needfree ||
+                (val.jsvar && !val.jsvar.inited)) {
+                return;
+            }
+
+            writeQJSBase(generateQJSFreeValue(val));
+            writeQJSTrailingSemicolon();
+            writeQJSLine();
+        }
+
+        function qjsWriteBackObjects(frame?: QJSFrame) {
+            const curFrame = frame ? frame : qjsGetCurFrame();
+            const qjsJSVarMap = curFrame.jsvarmap;
+
+            qjsJSVarMap.forEach((value, key) => {
+                if (value.kind === QJSJSVarKind.GlobalVar) {
+                    const qjsVar = value.cvar;
+                    if (qjsVar &&
+                        value.needsync) {
+                        const atom = qjsAtomMap.get(value.name)!;
+                        emitQJSSetGlobalVar(atom, qjsVar, "1");
+                        value.needsync = false;
+                    }
+                }
+                else if (value.kind === QJSJSVarKind.Prop) {
+                    const qjsVar = value.cvar;
+                    if (qjsVar &&
+                        value.needsync) {
+                        const [obj, name] = key.split("|");
+                        const atom = qjsAtomMap.get(name)!;
+                        emitQJSSetProperty(obj, atom, qjsVar);
+                        value.needsync = false;
+                    }
+                }
+            });
+
+            writeQJSLine(2);
+
+        }
+
+        function qjsHasExistedValueStack(qjsVar: QJSVar): boolean {
+            for (let i = qjsValueStack.length - 1; i >= 0; i --) {
+                if (qjsValueStack[i] === qjsVar) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        function qjsResetObjects(frame?: QJSFrame) {
+            const curFrame = frame ? frame : qjsGetCurFrame();
+            const qjsJSVarMap = curFrame.jsvarmap;
+
+            qjsJSVarMap.forEach((value, _) => {
+                if (qjsHasExistedValueStack(value.cvar)) {
+                    return;
+                }
+
+                if (value.kind === QJSJSVarKind.GlobalVar &&
+                    value.type !== QJSJSType.Function &&
+                    value.inited) {
+                    emitQJSFreeValue(value.cvar);
+                    value.inited = false;
+                }
+                else if (value.kind === QJSJSVarKind.Prop &&
+                        value.inited) {
+                    emitQJSFreeValue(value.cvar);
+                    value.inited = false;
+                }
+            });
+
+        }
+
+        function qjsResetCurFrameVarMap(frame?: QJSFrame) {
+            const curFrame = frame ? frame : qjsGetCurFrame();
+
+             // write back global var, prop etc.
+            const qjsJSVarMap = curFrame.jsvarmap;
+            qjsJSVarMap.forEach((value, key) => {
+                if (value.kind === QJSJSVarKind.LocalVar) {
+                    if (curFrame.preframe) {
+                        //const jsvar = curFrame.preframe.jsvarmap.get(value.name);
+                        const outerJsVar = value.outer;
+                        if (outerJsVar) {
+                            value.cvar.jsvar = outerJsVar;
+                            value.cvar.value = outerJsVar.value;
+                            value.cvar.jstype = outerJsVar.type;
+                        }
+
+                    }
+                }
+                else if (value.kind === QJSJSVarKind.GlobalVar) {
+                    const qjsVar = value.cvar;
+                    if (qjsVar &&
+                        value.needsync &&
+                        !value.outer) {
+                        const atom = qjsAtomMap.get(value.name)!;
+                        emitQJSSetGlobalVar(atom, qjsVar, "1");
+                        value.needsync = false;
+                    }
+
+                    if (value.outer) {
+                        value.outer.cvar.jsvar = value.outer;
+                    }
+                }
+                else if (value.kind === QJSJSVarKind.Prop) {
+                    const qjsVar = value.cvar;
+                    if (qjsVar &&
+                        value.needsync &&
+                        (!value.outer || !qjsConfig.enableLazyWriteBack)) {
+                        const [obj, name] = key.split("|");
+                        const atomName = qjsAtomMap.get(name)!;
+                        emitQJSSetProperty(obj, atomName, qjsVar);
+                        value.needsync = false;
+                    }
+
+                    if (value.outer) {
+                        value.outer.cvar.jsvar = value.outer;
+                    }
+                }
+            });
+        }
+
+        // free and pop the vars within current frame, and
+        // if isReturn is true, free vars until function frame
+        function emitQJSFreeVars(isReturn = false) {
+            const curFrame = qjsGetCurFrame();
+            if (!curFrame) {
+                return;
+            }
+
+            if (curFrame.vars.length === 0 && !isReturn) {
+                return;
+            }
+
+            let funcFrame: QJSFrame = curFrame;
+            if (isReturn) {
+                // find the function frame
+                while (funcFrame.container.kind !== SyntaxKind.FunctionDeclaration) {
+                    funcFrame = funcFrame.preframe!;
+                }
+            }
+
+            qjsResetCurFrameVarMap(curFrame);
+
+            writeQJSLine(2);
+
+            let frame = curFrame;
+            while (frame !== funcFrame.preframe) {
+                let start = frame.vars.length - 1;
+                while (start >= 0) {
+                    let qjsVar: QJSVar;
+                    if (frame === curFrame) {
+                        qjsVar = frame.vars.pop()!;
+                        //if (qjsVar.jsvar) {
+                        //    const qjsJSVarMap = frame.jsvarmap;
+                        //    qjsJSVarMap.delete(qjsVar.jsvar.name);
+                        //}
+                    }
+                    else {
+                        qjsVar = frame.vars[start];
+                    }
+
+                    start --;
+
+                    if (!qjsVar.needfree) {
+                        continue;
+                    }
+
+                    switch (qjsVar.type) {
+                        case QJSCType.JSValue:
+                            emitQJSFreeValue(qjsVar);
+                            break;
+                        case QJSCType.JSAtom:
+                            //emitQJSWriteBack(qjsVar);
+                            emitQJSFreeAtom(qjsVar);
+                            break;
+                        default:
+                            break;
+                    }
+                }
+
+                frame = frame.preframe!;
+            }
+        }
+
+        function emitQJSStaticVarDeclaration() {
+            qjsAtomMap.forEach((value, _) => {
+                writeQJSKeyword(QJSReserved.Static);
+                writeQJSSpace();
+                writeQJSKeyword(qjsTypeInfo[QJSCType.JSAtom].type);
+                writeQJSSpace();
+                writeQJSKeyword(value.name);
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            });
+            writeQJSLine(2);
+        }
+
+        function emitQJSInitAtomTable() {
+            writeQJSKeyword(QJSReserved.Static);
+            writeQJSSpace();
+            writeQJSKeyword(qjsTypeInfo[QJSCType.Void].type);
+            writeQJSSpace();
+            writeQJSKeyword(QJSReserved.InitAtomTableFunc);
+            writeQJSPunctuation("(");
+            writeQJSBase(QJSReserved.DefaultFuncCtxParam);
+            writeQJSPunctuation(")");
+            writeQJSSpace();
+            writeQJSPunctuation("{");
+            writeQJSLine();
+            increaseQJSIndent();
+            qjsAtomMap.forEach((value, key) => {
+
+                emitQJSNewAtom(value, key);
+            });
+            decreaseQJSIndent();
+            writeQJSPunctuation("}");
+            writeQJSLine(2);
+        }
+
+        function emitQJSFreeAtomTable() {
+            writeQJSKeyword(QJSReserved.Static);
+            writeQJSSpace();
+            writeQJSKeyword(qjsTypeInfo[QJSCType.Void].type);
+            writeQJSSpace();
+            writeQJSKeyword(QJSReserved.FreeAtomTableFunc);
+            writeQJSPunctuation("(");
+            writeQJSBase(QJSReserved.DefaultFuncCtxParam);
+            writeQJSPunctuation(")");
+            writeQJSSpace();
+            writeQJSPunctuation("{");
+            writeQJSLine();
+            increaseQJSIndent();
+            qjsAtomMap.forEach((value, _) => {
+                emitQJSFreeAtom(value);
+            });
+            decreaseQJSIndent();
+            writeQJSPunctuation("}");
+            writeQJSLine(2);
+        }
+
+        function emitQJSAtomTableFuncs() {
+            //writeQJSPush();
+            emitQJSStaticVarDeclaration();
+            emitQJSInitAtomTable();
+            emitQJSFreeAtomTable();
+            //writeQJSPop();
+        }
+
+        function emitQJSFuncDecls() {
+            qjsFuncDecls.forEach(decl => {
+                writeQJSBase(decl);
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            });
+
+            writeQJSLine(2);
+        }
+
+        function emitQJSCFunctionCall(funcName: string, params = "") {
+            writeQJSKeyword(funcName);
+            writeQJSPunctuation("(");
+            writeQJSBase(params);
+            writeQJSPunctuation(")");
+            writeQJSTrailingSemicolon();
+            writeQJSLine(2);
+        }
+
+        function emitQJSMain(node: SourceFile) {
+            const name = removeFileExtension(getBaseFileName(node.fileName));
+            const func_name = QJSReserved.FileFuncPrefix + name;
+            const atomName = qjsTypeInfo[QJSCType.JSAtom].prefix + QJSReserved.DefaultEntryFunc;
+            const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, atomName, true, true);
+            qjsAtomMap.set(QJSReserved.DefaultEntryFunc, qjsAtomVar);
+
+            writeQJSPush();
+            writeQJSBase("#include \"tsvm_helper.h\"");
+            writeQJSLine(2);
+            emitQJSAtomTableFuncs();
+            emitQJSFuncDecls();
+            writeQJSPop();
+
+            writeQJSBase("int main(int argc, char **argv)\n");
+            writeQJSPunctuation("{");
+            writeQJSLine();
+            increaseQJSIndent();
+            writeQJSBase("JSRuntime *rt;\n");
+            writeQJSBase("JSContext *ctx;\n");
+            writeQJSBase("JSValue obj_global;\n\n");
+            writeQJSBase("rt = JS_NewRuntime();\n");
+            writeQJSBase("ctx = JS_NewCustomContext(rt);\n\n");
+            writeQJSBase("js_std_add_helpers(ctx, 0, NULL);\n\n");
+            writeQJSBase("printf(\"This is auto-generated by TaiJS.\\n\");\n");
+            emitQJSCFunctionCall(QJSReserved.InitAtomTableFunc, QJSReserved.DefaultCtx);
+            writeQJSBase("obj_global = JS_GetGlobalObject(ctx);\n");
+            writeQJSBase("JSValue obj_js_main = JS_NewCFunction(ctx, " + func_name + ", \"" + QJSReserved.DefaultEntryFunc + "\", 0);\n");
+            writeQJSBase("JS_DefineGlobalFunction(ctx, " + atomName + ", obj_js_main, 0);\n");
+            writeQJSBase("JS_Call(ctx, obj_js_main, obj_global, 0, NULL);\n\n");
+
+            writeQJSBase("JS_FreeValue(ctx, obj_js_main);\n");
+            writeQJSBase("JS_FreeValue(ctx, obj_global);\n\n");
+            emitQJSCFunctionCall(QJSReserved.FreeAtomTableFunc, QJSReserved.DefaultCtx);
+            writeQJSBase("JS_FreeContext(ctx);\n");
+            writeQJSBase("JS_FreeRuntime(rt);\n");
+            writeQJSBase("return 0;\n");
+            decreaseQJSIndent();
+            writeQJSPunctuation("}");
+            writeQJSLine(2);
+
+            //JSValue obj_js_main = JS_NewCFunction(ctx, js_eval_file_add, "js_eval_file_add", 0);
+            //JSAtom atom_js_main = JS_NewAtom(ctx, "js_eval_file_add");
+        }
+
+        function emitQJSModuleInit(node: SourceFile) {
+            const name = removeFileExtension(getBaseFileName(node.fileName));
+            const initModuleName = QJSReserved.InitModulePrefix + name;
+
+            writeQJSBase("#ifdef JS_SHARED_LIBRARY\n");
+            writeQJSBase("#define JS_INIT_MODULE js_init_module\n");
+            writeQJSBase("#else\n");
+            writeQJSBase("#define JS_INIT_MODULE " + initModuleName + "\n");
+            writeQJSBase("#endif\n");
+            writeQJSLine(2);
+            writeQJSKeyword(qjsTypeInfo[QJSCType.JSModuleDef].type);
+            writeQJSBase(" * ");
+            writeQJSKeyword("JS_INIT_MODULE");
+            writeQJSBase("(JSContext *ctx, const JSAtom module_name)\n");
+            writeQJSPunctuation("{");
+            writeQJSLine();
+            increaseQJSIndent();
+            emitQJSCFunctionCall(QJSReserved.InitAtomTableFunc, QJSReserved.DefaultCtx);
+            writeQJSBase("JSModuleDef * module = JS_NewJSCModule(ctx, module_name, " + qjsInitFuncName + ", " + node.locals!.size + ");\n");
+            emitQJSModuleImports(node);
+            emitQJSModuleExports(node);
+            emitQJSCFunctionCall(QJSReserved.FreeAtomTableFunc, QJSReserved.DefaultCtx);
+            writeQJSBase("return module;\n");
+            decreaseQJSIndent();
+            writeQJSPunctuation("}");
+            writeQJSLine(2);
+
+            writeQJSPush();
+            writeQJSBase("#include \"tsvm_helper.h\"");
+            writeQJSLine(2);
+            emitQJSAtomTableFuncs();
+            writeQJSPop();
+
+            function emitQJSModuleExports(node: SourceFile) {
+                const symbol = checker!.getSymbolAtLocation(node);
+
+                if (!symbol!.exports) {
+                    return;
+                }
+
+                symbol!.exports.forEach((_, key) => {
+                    const exportName = unescapeLeadingUnderscores(key);
+                    const varAtomName = qjsTypeInfo[QJSCType.JSAtom].prefix + exportName;
+                    const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, varAtomName, true, true);
+                    if (!qjsAtomMap.get(exportName)) {
+                        qjsAtomMap.set(exportName, qjsAtomVar);
+                    }
+
+                    writeQJSBase(QJSReserved.If + " (");
+                    writeQJSBase(generateQJSAddModuleExportByAtom(qjsAtomVar));
+                    writeQJSBase(")");
+                    writeQJSLine();
+                    increaseQJSIndent();
+                    writeQJSBase(QJSReserved.Return + " NULL;");
+                    writeQJSLine();
+                    decreaseQJSIndent();
+                });
+                writeQJSLine(2);
+            }
+
+            type ImportedDeclaration = ImportClause | ImportSpecifier | NamespaceImport;
+            function isImportedDeclaration(node: Node): node is ImportedDeclaration {
+                return node.kind === SyntaxKind.ImportClause || node.kind === SyntaxKind.ImportSpecifier || node.kind === SyntaxKind.NamespaceImport;
+            }
+
+            function emitQJSModuleImports(node: SourceFile) {
+                if (!node.imports || node.imports.length === 0) {
+                    return;
+                }
+
+                if (!node.locals || node.locals.size === 0) {
+                    return;
+                }
+
+                node.imports.forEach((module) => {
+                    const modulePath = module.text;
+                    const pathParts = getNormalizedPathComponents(module.text, "");
+                    let moduleName = "";
+                    pathParts.forEach((value, index, array) => {
+                        if (value.length === 0) {
+                            return;
+                        }
+
+                        if (hasExtension(value)) {
+                            value = removeFileExtension(value);
+                        }
+                        moduleName += value;
+
+                        if (index === (array.length - 1)) {
+                            return;
+                        }
+
+                        moduleName += "_";
+                    });
+                    const varAtomName = qjsTypeInfo[QJSCType.JSAtom].prefix + moduleName;
+                    const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, varAtomName, true, true);
+                    if (!qjsAtomMap.get(modulePath)) {
+                        qjsAtomMap.set(modulePath, qjsAtomVar);
+                    }
+
+                    writeQJSBase(QJSReserved.If + " (");
+                    writeQJSBase(generateQJSAddReqModule(qjsAtomVar));
+                    writeQJSBase(")");
+                    writeQJSLine();
+                    increaseQJSIndent();
+                    writeQJSBase(QJSReserved.Return + " NULL;");
+                    writeQJSLine();
+                    decreaseQJSIndent();
+                });
+
+                let index = -1;
+                node.locals.forEach((value, _) => {
+                    index ++;
+                    if (value.valueDeclaration) {
+                        return;
+                    }
+
+                    if (value.exportSymbol) {
+                        return;
+                    }
+
+                    if (!isImportedDeclaration(value.declarations![0])) {
+                        return;
+                    }
+
+                    const isExternalImportAlias = !!(value.flags & SymbolFlags.Alias) && !some(value.declarations, d =>
+                        !!findAncestor(d, isExportDeclaration) ||
+                        isNamespaceExport(d) ||
+                        (isImportEqualsDeclaration(d) && !isExternalModuleReference(d.moduleReference))
+                    );
+
+                    const decl = value.declarations![0]! as ImportSpecifier;
+                    const importName = decl.propertyName ? getTextOfNode(decl.propertyName) : getTextOfNode(decl.name);
+                    const varAtomName = qjsTypeInfo[QJSCType.JSAtom].prefix + importName;
+                    const qjsAtomVar = qjsNewVar(undefined, QJSCType.JSAtom, varAtomName, true, true);
+                    if (!qjsAtomMap.get(importName)) {
+                        qjsAtomMap.set(importName, qjsAtomVar);
+                    }
+
+                    if (!isExternalImportAlias) {
+                        return;
+                    }
+
+                    writeQJSBase(QJSReserved.If + " (");
+                    writeQJSBase(generateQJSAddModuleImportByAtom(qjsAtomVar, index));
+                    writeQJSBase(")");
+                    writeQJSLine();
+                    increaseQJSIndent();
+                    writeQJSBase(QJSReserved.Return + " NULL;");
+                    writeQJSLine();
+                    decreaseQJSIndent();
+                });
+                writeQJSLine(2);
+            }
+        }
+
+        function emitQJSModuleFuncInit() {
+            writeQJSBase(QJSFunction.JS_MODULE_FUNC_PROLOGUE);
+            writeQJSBase("(m)");
+            writeQJSTrailingSemicolon();
+            writeQJSLine(2);
+        }
+
         function emitSourceFileWorker(node: SourceFile) {
             const statements = node.statements;
             pushNameGenerationScope(node);
             forEach(node.statements, generateNames);
+
+            if (!!printerOptions.emitQJSCode) {
+                if (isExternalModule(node))  {
+                    qjsEvalType = QJSEvalType.Module;
+                }
+
+                emitQJSFunctionEvalFileBegin(node);
+                if (qjsEvalType === QJSEvalType.Module) {
+                    emitQJSModuleFuncInit();
+                }
+
+                // currently, I choose to emit global var definition here, because of hoist needed.
+                // otherwise, we can collect the vars within declaration nodes, and
+                // go back here to emit definition.
+                const originNode = getParseTreeNode(node);
+                emitQJSVarDefList(originNode);
+            }
+
             emitHelpers(node);
             const index = findIndex(statements, statement => !isPrologueDirective(statement));
             emitTripleSlashDirectivesIfNeeded(node);
             emitList(node, statements, ListFormat.MultiLine, /*parenthesizerRule*/ undefined, index === -1 ? statements.length : index);
             popNameGenerationScope(node);
+
+            if (!!printerOptions.emitQJSCode) {
+                writeQJSLine(2);
+                emitQJSFunctionEnd(node);
+                Debug.assert(qjsValueStack.length === 0);
+
+                if (isExternalModule(node)) {
+                    emitQJSModuleInit(node);
+                }
+
+                if (!isExternalModule(node)) {
+                    emitQJSMain(node);
+                }
+            }
         }
 
         // Transformation nodes
@@ -4515,56 +10286,130 @@ namespace ts {
         }
 
         // Writers
+        function writeQJSPush() {
+            qjsWriter!.push!();
+        }
+
+        function writeQJSPop() {
+            qjsWriter!.pop!();
+        }
 
         function writeLiteral(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeLiteral(s);
         }
 
         function writeStringLiteral(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeStringLiteral(s);
         }
 
         function writeBase(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.write(s);
         }
 
+        function writeQJSBase(s: string) {
+            qjsWriter!.write(s);
+        }
+
         function writeSymbol(s: string, sym: Symbol) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeSymbol(s, sym);
         }
 
         function writePunctuation(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writePunctuation(s);
         }
 
+        function writeQJSPunctuation(s: string) {
+            qjsWriter!.writePunctuation(s);
+        }
+
         function writeTrailingSemicolon() {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeTrailingSemicolon(";");
         }
 
+        function writeQJSTrailingSemicolon() {
+            qjsWriter!.writeTrailingSemicolon(";");
+        }
+
         function writeKeyword(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeKeyword(s);
         }
 
+        function writeQJSKeyword(s: string) {
+            qjsWriter!.writeKeyword(s);
+        }
+
         function writeOperator(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeOperator(s);
         }
 
+        function writeQJSOperator(s: string) {
+            qjsWriter!.writeOperator(s);
+        }
+
         function writeParameter(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeParameter(s);
         }
 
         function writeComment(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeComment(s);
         }
 
+        function writeQJSComment(s: string) {
+            qjsWriter!.writeComment(s);
+        }
+
         function writeSpace() {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeSpace(" ");
         }
 
+        function writeQJSSpace() {
+            qjsWriter!.writeSpace(" ");
+        }
+
         function writeProperty(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.writeProperty(s);
         }
 
         function nonEscapingWrite(s: string) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             // This should be defined in a snippet-escaping text writer.
             if (writer.nonEscapingWrite) {
                 writer.nonEscapingWrite(s);
@@ -4575,17 +10420,40 @@ namespace ts {
         }
 
         function writeLine(count = 1) {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             for (let i = 0; i < count; i++) {
                 writer.writeLine(i > 0);
             }
         }
 
+        function writeQJSLine(count = 1) {
+            for (let i = 0; i < count; i++) {
+                qjsWriter!.writeLine(i > 0);
+            }
+        }
+
         function increaseIndent() {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.increaseIndent();
         }
 
+        function increaseQJSIndent() {
+            qjsWriter!.increaseIndent();
+        }
+
         function decreaseIndent() {
+            if (qjsPauseJSEmit) {
+                return;
+            }
             writer.decreaseIndent();
+        }
+
+        function decreaseQJSIndent() {
+            qjsWriter!.decreaseIndent();
         }
 
         function writeToken(token: SyntaxKind, pos: number, writer: (s: string) => void, contextNode?: Node) {
@@ -4594,11 +10462,32 @@ namespace ts {
                 : writeTokenText(token, writer, pos);
         }
 
+        function writeQJSTokenNode(node: Node) {
+            if (!printerOptions.emitQJSCode) {
+                return;
+            }
+
+            if (node.kind === SyntaxKind.TrueKeyword ||
+                node.kind === SyntaxKind.FalseKeyword) {
+                const val = prepareQJSTempVar(QJSCType.Bool, QJSJSType.Bool);
+                writeQJSKeyword(qjsTypeInfo[QJSCType.Bool].type);
+                writeQJSSpace();
+                writeQJSBase(val.name);
+                writeQJSSpace();
+                writeQJSPunctuation("=");
+                writeQJSSpace();
+                writeQJSBase(node.kind === SyntaxKind.TrueKeyword ? QJSReserved.True : QJSReserved.False);
+                writeQJSTrailingSemicolon();
+                writeQJSLine();
+            }
+        }
+
         function writeTokenNode(node: Node, writer: (s: string) => void) {
             if (onBeforeEmitToken) {
                 onBeforeEmitToken(node);
             }
             writer(tokenToString(node.kind)!);
+            writeQJSTokenNode(node);
             if (onAfterEmitToken) {
                 onAfterEmitToken(node);
             }

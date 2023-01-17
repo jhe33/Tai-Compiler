@@ -510,6 +510,17 @@ namespace ts {
             defaultValueDescription: false,
         },
         {
+            name: "emitQJSCode",
+            type: "boolean",
+            affectsEmit: true,
+            showInSimplifiedHelpView: true,
+
+            category: Diagnostics.Emit,
+            description: Diagnostics.Only_output_d_ts_files_and_not_JavaScript_files,
+            transpileOptionValue: undefined,
+            defaultValueDescription: false,
+        },
+        {
             name: "sourceMap",
             type: "boolean",
             affectsEmit: true,

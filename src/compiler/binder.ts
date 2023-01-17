@@ -191,6 +191,7 @@ namespace ts {
         let thisParentContainer: Node; // Container one level up
         let blockScopeContainer: Node;
         let lastContainer: Node;
+        let funcContainer: FunctionDeclaration;
         let delayedTypeAliases: (JSDocTypedefTag | JSDocCallbackTag | JSDocEnumTag)[];
         let seenThisKeyword: boolean;
 
@@ -267,6 +268,7 @@ namespace ts {
             thisParentContainer = undefined!;
             blockScopeContainer = undefined!;
             lastContainer = undefined!;
+            funcContainer = undefined!;
             delayedTypeAliases = undefined!;
             seenThisKeyword = false;
             currentFlow = undefined!;
@@ -456,6 +458,10 @@ namespace ts {
 
                 if (!symbol) {
                     symbolTable.set(name, symbol = createSymbol(SymbolFlags.None, name));
+                    if (funcContainer) {
+                        symbol.stackIndex = funcContainer.localsCount;
+                        funcContainer.localsCount ++;
+                    }
                     if (isReplaceableByMethod) symbol.isReplaceableByMethod = true;
                 }
                 else if (isReplaceableByMethod && !symbol.isReplaceableByMethod) {
@@ -617,6 +623,7 @@ namespace ts {
             const saveContainer = container;
             const saveThisParentContainer = thisParentContainer;
             const savedBlockScopeContainer = blockScopeContainer;
+            const savedFuncContainer = funcContainer;
 
             // Depending on what kind of node this is, we may have to adjust the current container
             // and block-container.   If the current node is a container, then it is automatically
@@ -640,6 +647,10 @@ namespace ts {
                     thisParentContainer = container;
                 }
                 container = blockScopeContainer = node;
+                if (container.kind === SyntaxKind.FunctionDeclaration) {
+                    funcContainer = container as FunctionDeclaration;
+                    funcContainer.localsCount = 0;
+                }
                 if (containerFlags & ContainerFlags.HasLocals) {
                     container.locals = createSymbolTable();
                 }
@@ -721,6 +732,7 @@ namespace ts {
             container = saveContainer;
             thisParentContainer = saveThisParentContainer;
             blockScopeContainer = savedBlockScopeContainer;
+            funcContainer = savedFuncContainer;
         }
 
         function bindEachFunctionsFirst(nodes: NodeArray<Node> | undefined): void {
