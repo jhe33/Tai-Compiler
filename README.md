@@ -7,8 +7,10 @@ implemented, like constant folding, propagation, copy propagation, LVN, GVN and 
 even devirtualization etc. Hopefully it can get 3x-5x performance up than QuickJS interpretor.
 
 My previous experiment, a singlepass compiler which only emits C code without any compiler optimization
-involved shows C compiler and TSC type inference, could bring 2X performance gain. more optimization
-could generate better performance. I choose some cost effective optimizations.
+involved, shows C compiler and TSC type inference could bring 2X performance gain.
+
+more optimization could generate better performance. for that and efforts I can take, I choose
+some cost effective optimizations.
 
 
 
